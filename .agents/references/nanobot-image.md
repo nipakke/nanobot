@@ -6,7 +6,7 @@ Sources: `README.md`, `docs/*.md`, `Dockerfile`, `entrypoint.sh`, `compose*.yml`
 
 - Debian `bookworm-slim`; glibc is required, so no Alpine. `nanobot-ai` (version pinned in `Dockerfile`) lives in `/app/.venv` (image layer, ephemeral, owned by `nanobot`); the pixi binary is baked in.
 - The default image omits the ~123 MiB `nanobot/tui/bin/nanobot-tui-linux-x64` from the builder stage, so no whiteout and no final-image layer carries it. The launcher downloads the checksum-verified release asset to `/data/config/bin/tui/<version>` on first TUI use; `NANOBOT_TUI_NO_DOWNLOAD=1` forces the documented `TuiUnavailableError`. `BUNDLE_TUI=1` keeps the binary for offline/air-gapped builds.
-- No `.pyc` is baked. `PYTHONPYCACHEPREFIX=/data/cache/pycache` compiles imported modules on first use into the disposable cache tree; recreates reuse them. Healthcheck still runs `-B`.
+- No `.pyc` is baked. `PYTHONPYCACHEPREFIX=/data/cache/pycache` compiles imported modules on first use into the disposable cache tree; recreates reuse them. Healthcheck runs the root-owned system Python with `-I -B` and drops to `nanobot` before probing.
 - Homebrew source is pinned to a release tag and commit (`BREW_VERSION`, `BREW_COMMIT` in `Dockerfile`), verified at build time. `docs`, `manpages`, `completions` and `.github` are pruned; `.git` is kept so `brew --version` reports the concrete release.
 - pixi is the only supported way to install runtime native/CLI tools. No runtime `apt`/`apk`, no `sudo`, no setuid helpers.
 - Root exists only for setup (`/data` trees and ownership fixes), then `exec setpriv --reuid=nanobot --regid=nanobot --init-groups`.

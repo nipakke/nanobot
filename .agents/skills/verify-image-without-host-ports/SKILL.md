@@ -34,7 +34,7 @@ docker run -d --name "$P" \
 # Wait for the gateway via the container-side check, not a host port.
 for _ in $(seq 1 60); do
   docker exec -u nanobot "$P" \
-    /app/.venv/bin/python -B /usr/local/bin/healthcheck.py && break
+    /usr/local/bin/python3 -I -B /usr/local/bin/healthcheck.py && break
   sleep 2
 done
 ```

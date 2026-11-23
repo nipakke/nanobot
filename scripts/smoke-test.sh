@@ -581,8 +581,15 @@ esac
 section health "Healthcheck and port mapping"
 assert_eq "Docker health is healthy" "healthy" "$(health_status)"
 healthcheck_test="$(docker inspect -f '{{json .Config.Healthcheck.Test}}' "$CID")"
+assert_contains "healthcheck runs the root-owned system python" "$healthcheck_test" '"/usr/local/bin/python3"'
+assert_contains "healthcheck runs in isolated mode (-I)" "$healthcheck_test" '"-I"'
 assert_contains "healthcheck uses -B" "$healthcheck_test" '"-B"'
 assert_contains "healthcheck runs the stdlib script" "$healthcheck_test" "/usr/local/bin/healthcheck.py"
+if printf '%s' "$healthcheck_test" | grep -Fq "/app/.venv/"; then
+    fail "healthcheck does not invoke nanobot-writable /app/.venv"
+else
+    pass "healthcheck does not invoke nanobot-writable /app/.venv"
+fi
 port_map="$(docker port "$CID" 18790 2>&1)"
 assert_contains "container port 18790 is published on host $HEALTH_HOST_PORT" \
     "$port_map" "127.0.0.1:$HEALTH_HOST_PORT"
@@ -603,7 +610,11 @@ assert_contains "host health payload reports ready" "$host_health" '"ready": tru
 # Bootstrap with flags when config is missing
 # ---------------------------------------------------------------------------
 section bootstrap "Bootstrap with subcommand flags"
-exec_root rm -f /data/config/config.json
+"${COMPOSE[@]}" stop nanobot >/dev/null || fatal "could not stop nanobot before bootstrap test"
+docker run --rm --user 0:0 --entrypoint /bin/rm \
+    -v "${PROJECT}_nanobot_config:/data/config" \
+    "$IMAGE" -f /data/config/config.json >/dev/null \
+    || fatal "could not remove config.json before bootstrap test"
 "${COMPOSE[@]}" run -d --no-deps --name "$BOOTSTRAP_NAME" nanobot gateway --verbose >/dev/null \
     || fatal "compose run for bootstrap failed"
 bootstrapped=""
@@ -624,7 +635,7 @@ print(json.load(open("/data/config/config.json"))["agents"]["defaults"]["workspa
 ' 2>&1)"
 assert_eq "bootstrapped workspace is absolute" "/data/config/workspace" "$bootstrap_workspace"
 docker rm -f "$BOOTSTRAP_NAME" >/dev/null 2>&1
-restart_service
+start_service
 
 # ---------------------------------------------------------------------------
 # Symlink safety and migration
@@ -636,19 +647,21 @@ done
 
 docker run --rm --user 0:0 --entrypoint /bin/bash \
     -v "${PROJECT}_sym_home:/data/home" \
-    "$IMAGE" -c 'mkdir -p /data/home/.nanobot && echo legacy-data > /data/home/.nanobot/legacy.txt' \
+    "$IMAGE" -c 'mkdir -p /data/home/.nanobot/workspace && echo legacy-data > /data/home/.nanobot/legacy.txt && echo migrated-ws > /data/home/.nanobot/workspace/migrated.txt' \
     >/dev/null || fatal "could not seed legacy home"
 
-docker run --rm --user 0:0 \
+migration_cwd="$(docker run --rm --user 0:0 \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
     --security-opt no-new-privileges:true \
     -v "${PROJECT}_sym_config:/data/config" \
     -v "${PROJECT}_sym_home:/data/home" \
     -v "${PROJECT}_sym_pixi:/data/pixi" \
     -v "${PROJECT}_sym_cache:/data/cache" \
-    "$IMAGE" /bin/true >/dev/null 2>&1
+    "$IMAGE" /usr/local/bin/python3 -I -B -c 'import os; print(os.getcwd())' 2>&1)"
 migration_rc=$?
 assert_eq "migration startup exits 0" "0" "$migration_rc"
+assert_eq "WORKDIR remains valid after workspace migration" "/data/config/workspace" \
+    "$(printf '%s\n' "$migration_cwd" | tail -n 1)"
 
 migration_state="$(docker run --rm --user 0:0 --entrypoint /bin/bash \
     -v "${PROJECT}_sym_config:/data/config" \
@@ -656,20 +669,48 @@ migration_state="$(docker run --rm --user 0:0 --entrypoint /bin/bash \
     "$IMAGE" -c '
 readlink -f /data/home/.nanobot
 cat /data/config/legacy.txt
+cat /data/config/workspace/migrated.txt
 if [ -L /data/home/.nanobot ]; then echo source-replaced-by-symlink; else echo source-still-directory; fi
 if compgen -G "/data/home/.nanobot.legacy.*" >/dev/null; then echo legacy-present; else echo no-legacy; fi
 stat -c "%a %u:%g" /data/home/.nanobot
 ' 2>&1)"
 migration_link="$(printf '%s\n' "$migration_state" | sed -n '1p')"
 migration_data="$(printf '%s\n' "$migration_state" | sed -n '2p')"
-migration_source="$(printf '%s\n' "$migration_state" | sed -n '3p')"
-migration_legacy="$(printf '%s\n' "$migration_state" | sed -n '4p')"
-migration_owner="$(printf '%s\n' "$migration_state" | sed -n '5p')"
+migration_ws="$(printf '%s\n' "$migration_state" | sed -n '3p')"
+migration_source="$(printf '%s\n' "$migration_state" | sed -n '4p')"
+migration_legacy="$(printf '%s\n' "$migration_state" | sed -n '5p')"
+migration_owner="$(printf '%s\n' "$migration_state" | sed -n '6p')"
 assert_eq "migrated symlink resolves to /data/config" "/data/config" "$migration_link"
 assert_eq "legacy file migrated without loss" "legacy-data" "$migration_data"
+assert_eq "legacy workspace file migrated without loss" "migrated-ws" "$migration_ws"
 assert_eq "legacy source replaced by the symlink" "source-replaced-by-symlink" "$migration_source"
 assert_eq "migration did not leave a legacy copy behind" "no-legacy" "$migration_legacy"
 assert_eq "symlink ownership fixed" "777 1000:1000" "$migration_owner"
+
+# Root setup phase must ignore binaries placed in nanobot-writable PATH dirs.
+docker run --rm --user 0:0 --entrypoint /bin/bash \
+    -v "${PROJECT}_sym_pixi:/data/pixi" \
+    "$IMAGE" -c '
+mkdir -p /data/pixi/bin
+printf "#!/bin/sh\necho HIJACKED\nexit 99\n" > /data/pixi/bin/setpriv
+printf "#!/bin/sh\necho HIJACKED\nexit 99\n" > /data/pixi/bin/id
+chmod 0755 /data/pixi/bin/setpriv /data/pixi/bin/id
+' >/dev/null || fatal "could not seed PATH hijack decoy"
+hijack_out="$(docker run --rm --user 0:0 \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
+    --security-opt no-new-privileges:true \
+    -v "${PROJECT}_sym_config:/data/config" \
+    -v "${PROJECT}_sym_home:/data/home" \
+    -v "${PROJECT}_sym_pixi:/data/pixi" \
+    -v "${PROJECT}_sym_cache:/data/cache" \
+    "$IMAGE" /usr/bin/id -u 2>&1)"
+hijack_rc=$?
+assert_eq "root phase ignores nanobot-writable PATH decoys" "0" "$hijack_rc"
+assert_eq "entrypoint still drops to uid 1000 with PATH decoys present" "1000" \
+    "$(printf '%s\n' "$hijack_out" | tail -n 1)"
+docker run --rm --user 0:0 --entrypoint /bin/rm \
+    -v "${PROJECT}_sym_pixi:/data/pixi" \
+    "$IMAGE" -f /data/pixi/bin/setpriv /data/pixi/bin/id >/dev/null 2>&1 || true
 
 # Wrong-target symlink must fail closed and stay untouched.
 docker volume create "${PROJECT}_sym_home2" >/dev/null
@@ -788,21 +829,28 @@ assert_eq "discord, telegram, and slack_sdk import from /app/.venv" "imports-ok"
 channel_versions="$(exec_nanobot /app/.venv/bin/python -c '
 from importlib.metadata import version
 from packaging.requirements import Requirement
-checks = (
-    ("discord.py", "discord.py>=2.5.2,<3.0.0"),
-    ("python-telegram-bot", "python-telegram-bot[socks,webhooks]>=22.6,<23.0"),
-    ("slack-sdk", "slack-sdk>=3.39.0,<4.0.0"),
-)
-for name, spec in checks:
-    installed = version(name)
-    if not Requirement(spec).specifier.contains(installed):
-        raise SystemExit(f"{name} {installed} does not satisfy {spec}")
-    print(f"{name}={installed}")
+from nanobot.channels.registry import discover_plugins
+from nanobot.optional_features import extra_installed
+
+plugins = discover_plugins()
+for channel in ("discord", "telegram", "slack"):
+    deps = list(plugins[channel].dependencies)
+    if not deps:
+        raise SystemExit(f"{channel} declared no dependencies")
+    if not extra_installed(channel, deps):
+        raise SystemExit(f"{channel} requirements not satisfied: {deps}")
+    for spec in deps:
+        req = Requirement(spec)
+        installed = version(req.name)
+        if not req.specifier.contains(installed, prereleases=True):
+            raise SystemExit(f"{channel}: {req.name} {installed} does not satisfy {spec}")
+        print(f"{channel}:{req.name}={installed}")
 ' 2>&1)"
-assert_contains "discord.py satisfies the manifest constraint" "$channel_versions" "discord.py=2."
-assert_contains "python-telegram-bot satisfies the manifest constraint" \
-    "$channel_versions" "python-telegram-bot=22."
-assert_contains "slack-sdk satisfies the manifest constraint" "$channel_versions" "slack-sdk=3."
+channel_versions_rc=$?
+assert_eq "all declared channel requirements satisfy their manifests" "0" "$channel_versions_rc"
+assert_contains "discord manifest dependencies verified" "$channel_versions" "discord:"
+assert_contains "telegram manifest dependencies verified" "$channel_versions" "telegram:"
+assert_contains "slack manifest dependencies verified" "$channel_versions" "slack:"
 
 gateway_channels_env="$(exec_root sh -c '
 for p in /proc/[0-9]*; do
