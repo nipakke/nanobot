@@ -68,10 +68,6 @@ Two separate workflows keep pull requests isolated from registry secrets:
   `<version>`, and `<version>-<YYYYMMDD>-<shortsha>`, and pushes that exact
   tested image.
 
-> **Dry-run state:** The Docker Hub login and `docker push` steps in
-> `.github/workflows/publish.yml` are commented out until the Docker Hub repo
-> and secrets are configured.
-
 [`renovate.json`](../renovate.json) tracks `Dockerfile` pins, base image
 digests, and GitHub Actions (stable releases only, 2-day `minimumReleaseAge`):
 
@@ -91,4 +87,3 @@ digests, and GitHub Actions (stable releases only, 2-day `minimumReleaseAge`):
 3. Install the **Renovate** GitHub App on the repository.
 4. Enable **Allow auto-merge** in GitHub Settings → General.
 5. Protect `main` with a ruleset requiring the `test` status check.
-6. Uncomment the login and push steps in `.github/workflows/publish.yml`.

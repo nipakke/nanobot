@@ -40,7 +40,7 @@ Sources: `README.md`, `docs/*.md`, `Dockerfile`, `entrypoint.sh`, `compose*.yml`
 
 - `Dockerfile` is the single source of truth for version pins (`NANOBOT_VERSION`, `PIXI_VERSION`, `BREW_VERSION` + `BREW_COMMIT`, and digest-pinned `FROM` lines). `compose.build.yml` passes pin args through only when set in env/`.env`; `compose.yml` defaults to `nipakke/nanobot:latest` while `compose.build.yml` tags `nanobot-pixi:local`.
 - `renovate.json`: stable releases only, 2-day `minimumReleaseAge`. Every `nanobot-ai` release (majors included) opens a PR immediately and auto-merges on green `test`; base-image digests, pixi, Homebrew, and GitHub Actions (minor/patch/digest) batch into one monthly auto-merged PR on the 1st; majors of non-nanobot dependencies wait for approval.
-- Two separate workflows keep PRs isolated from registry secrets on a public repo: `.github/workflows/test.yml` (`pull_request` only, required check, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image-file paths or `workflow_dispatch`; builds, runs the smoke test suite via `NANOBOT_SMOKE_SKIP_BUILD=1`, tags `latest`, `<version>`, and immutable `<version>-<YYYYMMDD>-<shortsha>`, then pushes that exact tested image; login/push steps start commented out for dry-run).
+- Two separate workflows keep PRs isolated from registry secrets on a public repo: `.github/workflows/test.yml` (`pull_request` only, required check, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image-file paths or `workflow_dispatch`; builds, runs the smoke test suite via `NANOBOT_SMOKE_SKIP_BUILD=1`, tags `latest`, `<version>`, and immutable `<version>-<YYYYMMDD>-<shortsha>`, then pushes that exact tested image).
 
 ## Commands
 
