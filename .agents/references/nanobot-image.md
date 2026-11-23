@@ -1,6 +1,6 @@
 # nanobot image — durable facts
 
-Sources: `README.md`, `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-design.md`, `Dockerfile`, `entrypoint.sh`, `compose*.yaml`, `scripts/smoke-test.sh`.
+Sources: `README.md`, `docs/*.md`, `Dockerfile`, `entrypoint.sh`, `compose*.yml`, `scripts/smoke-test.sh`.
 
 ## Image
 
@@ -17,15 +17,14 @@ Sources: `README.md`, `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-des
 
 ## Persistence
 
-- Five trees: `/data/config` (`NANOBOT_HOME`: config, sessions, memory, workspace, downloaded TUI bundles), `/data/home` (`HOME`, uv tools, npm globals, `~/.local/bin`), `/data/pixi` (`PIXI_HOME`), `/data/brew` (`HOMEBREW_PREFIX`), `/data/cache` (100% disposable, including `pycache`).
-- `/data/brew` is always the `nanobot_brew` named volume, in both modes. Never point it at `./data`, where Homebrew's write churn has destabilised the Docker engine (see `.agents/lessons/rules.md`).
-- `compose.bind.yaml` maps config/home/pixi/cache to binds under `./data`; brew stays a volume. `docker compose -f compose.yaml -f compose.bind.yaml config` shows four binds and one volume at `/data/brew`.
-- The root phase creates `/data/home/.nanobot -> /data/config`; `/data/home/.nanobot` symlinks to `/data/config` and is never a real directory.
-- The symlink is load-bearing, not cosmetic: nanobot 0.4.2 builds its update/data-access locks, bun tool cache, QQ media and gateway default config path from `Path.home()/".nanobot"` and ignores `set_home_path()`. Without the symlink those land in `/data/home` (verified: `updates/data-locks`), splitting state across trees. Never remove it without patching those call sites.
+- Five trees under `/data`: `/data/config` (`NANOBOT_HOME`: config, sessions, memory, workspace, downloaded TUI bundles), `/data/home` (`HOME`, uv tools, npm globals, `~/.local/bin`), `/data/pixi` (`PIXI_HOME`), `/data/brew` (`HOMEBREW_PREFIX`), `/data/cache` (100% disposable, including `pycache`).
+- `compose.yml` uses bind mounts (`./data:/data` by default, with the 5 separate bind mounts commented out) and declares `healthcheck:`. `Dockerfile` stores the baked Homebrew tree at `/usr/local/share/nanobot-brew-seed` (same layer, no duplication) and `entrypoint.sh` seeds `/data/brew` on first start when `/data/brew/bin/brew` is absent, so a single empty host bind mount (e.g. `/data/nanobot:/data`) works out of the box without network. On Windows/Docker Desktop 9p binds, heavy brew write churn can still destabilise the engine (see `.agents/lessons/rules.md`), so `scripts/smoke-compose.yml` overrides `volumes:` with isolated named volumes for smoke tests.
+- The root phase creates `/data/home/.nanobot -> /data/config`; `/data/home/.nanobot` symlinks to `/data/config` and is never a real directory. Symlink setup never clobbers data: a pre-existing directory migrates into an empty `/data/config`, is preserved as `.nanobot.legacy.<timestamp>` if both hold data, and a wrong-target symlink or mount point fails closed.
+- The symlink is load-bearing, not cosmetic: upstream nanobot builds its update/data-access locks, bun tool cache, QQ media and gateway default config path from `Path.home()/".nanobot"` and ignores `set_home_path()`. Without the symlink those land in `/data/home` (verified: `updates/data-locks`), splitting state across trees. Never remove it without patching those call sites.
 - Wiping `/data/cache` must never break installed tools or config.
 - Never mount a volume over `/app/.venv`; it changes only with `NANOBOT_VERSION` or the image tag.
-- `NANOBOT_HOME` is an image-level helper, not upstream nanobot 0.4.2 (no env equivalent to `--home`). The venv `sitecustomize.py` shim and the `/data/home/.nanobot -> /data/config` symlink together make resolution consistent: `nanobot status` names `/data/config/config.json` and filesystem-based resolution lands in `/data/config`.
-- Health: container-side `NANOBOT_HEALTH_PORT` (default 18790) is what the healthcheck reads; `NANOBOT_HEALTH_HOST_PORT` moves only the published host port.
+- `NANOBOT_HOME` is an image-level helper, not an upstream nanobot variable (no env equivalent to `--home`). The venv `sitecustomize.py` shim and the `/data/home/.nanobot -> /data/config` symlink together make resolution consistent: `nanobot status` names `/data/config/config.json` and filesystem-based resolution lands in `/data/config`.
+- Ports: container ports are fixed (`8765` WebUI, `18790` healthcheck); `compose.yml` publishes `8765:8765` and `127.0.0.1:18790:18790` directly (`smoke-compose.yml` overrides host ports for tests).
 - One container per data folder: two gateways on the same `./data` corrupt sessions and race on the workspace `.git` (`GitStoreError: Git store init failed`, dulwich `FileExistsError`).
 
 ## Runtime installation
@@ -39,27 +38,25 @@ Sources: `README.md`, `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-des
 
 ## Publishing and updates
 
-- `Dockerfile` is the single source of truth for version pins (`NANOBOT_VERSION`, `PIXI_VERSION`, `BREW_VERSION` + `BREW_COMMIT`, and digest-pinned `FROM` lines). `compose.build.yaml` passes pin args through only when set in env/`.env`; `compose.yaml` defaults to `nipakke/nanobot:latest` while `compose.build.yaml` tags `nanobot-pixi:local`.
+- `Dockerfile` is the single source of truth for version pins (`NANOBOT_VERSION`, `PIXI_VERSION`, `BREW_VERSION` + `BREW_COMMIT`, and digest-pinned `FROM` lines). `compose.build.yml` passes pin args through only when set in env/`.env`; `compose.yml` defaults to `nipakke/nanobot:latest` while `compose.build.yml` tags `nanobot-pixi:local`.
 - `renovate.json`: stable releases only, 2-day `minimumReleaseAge`. Every `nanobot-ai` release (majors included) opens a PR immediately and auto-merges on green `test`; base-image digests, pixi, Homebrew, and GitHub Actions (minor/patch/digest) batch into one monthly auto-merged PR on the 1st; majors of non-nanobot dependencies wait for approval.
-- Two separate workflows keep PRs isolated from registry secrets on a public repo: `.github/workflows/test.yml` (`pull_request` only, required check, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image-file paths or `workflow_dispatch`; builds, runs A1–A22 via `NANOBOT_SMOKE_SKIP_BUILD=1`, tags `latest`, `<version>`, and immutable `<version>-<YYYYMMDD>-<shortsha>`, then pushes that exact tested image; login/push steps start commented out for dry-run).
+- Two separate workflows keep PRs isolated from registry secrets on a public repo: `.github/workflows/test.yml` (`pull_request` only, required check, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image-file paths or `workflow_dispatch`; builds, runs the smoke test suite via `NANOBOT_SMOKE_SKIP_BUILD=1`, tags `latest`, `<version>`, and immutable `<version>-<YYYYMMDD>-<shortsha>`, then pushes that exact tested image; login/push steps start commented out for dry-run).
 
 ## Commands
 
 ```sh
-# Live stack, bind mode (config/home/pixi/cache in ./data, brew on nanobot_brew)
-docker compose -f compose.yaml -f compose.bind.yaml up -d
-
 # Named-volume stack / local build
 docker compose up -d
-docker compose -f compose.yaml -f compose.build.yaml up -d --build
+docker compose -f compose.yml -f compose.build.yml up -d --build
 
-# Acceptance suite A1-A22: builds nanobot-pixi:smoke, unique project,
+# Smoke test suite: builds nanobot-pixi:smoke, unique project,
 # container, and host ports; cleans up only its own resources
 bash scripts/smoke-test.sh
 NANOBOT_SMOKE_WEB_PORT=<port> NANOBOT_SMOKE_HEALTH_PORT=<port> bash scripts/smoke-test.sh
 
-# Validate the Compose overlay chain
-docker compose -f compose.yaml -f compose.bind.yaml config -q
+# Validate Compose files
+docker compose -f compose.yml config -q
+docker compose -f compose.yml -f compose.build.yml config -q
 ```
 
 The suite defaults to host ports 18766 (web) and 18791 (health); both are overridable with `NANOBOT_SMOKE_WEB_PORT` / `NANOBOT_SMOKE_HEALTH_PORT`. On Windows hosts whose excluded port ranges cover the defaults, Docker Desktop fails with `forwards/expose ... 500` and an access-denied bind, so pick free ports.

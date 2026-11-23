@@ -1,7 +1,7 @@
 name: test
 
-# Pull-request verification only. Builds the image and runs the full A1-A22
-# acceptance suite. Contains no registry credentials and never publishes, so it
+# Pull-request verification only. Builds the image and runs the full smoke test
+# suite. Contains no registry credentials and never publishes, so it
 # is safe to run on untrusted PRs in a public repository.
 #
 # Require this job (`test`) in branch protection on `main` to gate Renovate
@@ -49,7 +49,7 @@ jobs:
           cache-from: ${{ !env.ACT && 'type=gha' || '' }}
           cache-to: ${{ !env.ACT && 'type=gha,mode=max' || '' }}
 
-      - name: Acceptance suite (A1-A22)
+      - name: Run smoke tests
         env:
           NANOBOT_SMOKE_IMAGE: ${{ env.TEST_IMAGE }}
           NANOBOT_SMOKE_SKIP_BUILD: "1"

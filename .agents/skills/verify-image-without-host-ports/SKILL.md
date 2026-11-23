@@ -1,7 +1,7 @@
 ---
 name: verify-image-without-host-ports
 description: >-
-  Use when the acceptance suite cannot start because Docker cannot publish a
+  Use when the smoke test suite cannot start because Docker cannot publish a
   host port (Docker Desktop/WSL2 `/forwards/expose returned unexpected status:
   500`, excluded port ranges), or when a behavioral check is needed without
   disturbing a live stack.
@@ -63,11 +63,11 @@ for v in config home pixi cache; do docker volume rm "${P}_$v"; done
 ## Boundaries
 
 - Does not exercise host-port mapping, Compose `--wait`, or the host-side
-  `/health` URL. A6/A7 and the suite's HTTP checks still need real ports.
+  `/health` URL. Startup port-binding and host HTTP checks still need real ports.
 - Does not replace `bash scripts/smoke-test.sh`. Run the suite once Docker can
   publish ports again; this mode is for when it cannot.
 
 ## Origin
 
-2026-11-23 — L-0013 (Docker Desktop forwarded-port 500 at suite A6; 17 of 18
+2026-11-23 — L-0013 (Docker Desktop forwarded-port 500 during smoke test startup; 17 of 18
 targeted checks still ran this way).

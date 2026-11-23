@@ -4,7 +4,7 @@
 # Stage 1: build the nanobot venv with uv, pinned to the system Python.
 # ---------------------------------------------------------------------------
 #
-# Version pins live only here: compose.build.yaml and .env pass them through
+# Version pins live only here: compose.build.yml and .env pass them through
 # only when explicitly set. Renovate updates these lines (renovate.json): the
 # `# renovate:` comment above each pin names its upstream source, and the base
 # images are pinned by digest within their tag line.
@@ -92,7 +92,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 3: runtime image.
 #
-# Homebrew is baked into /data/brew (persisted on its own named volume) because
+# Homebrew is seeded into /data/brew from the image on first start because
 # nanobot's WebUI app runner executes `brew install ...` with a minimal env
 # (HOME, LANG, TERM, PATH, PYTHONUNBUFFERED) and resolves `brew` from PATH:
 # image-level HOMEBREW_* variables never reach that subprocess. brew derives its
@@ -179,20 +179,24 @@ COPY --chown=nanobot:nanobot --from=nanobot /app/.venv /app/.venv
 COPY --from=nanobot /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=pixi /usr/local/bin/pixi /usr/local/bin/pixi
 
-# Persistent trees are seeded with the right ownership so Docker named
-# volumes created from this image inherit 1000:1000 on first use. The runtime
-# entrypoint never runs an unconditional recursive chown.
+# Persistent trees are seeded with the right ownership so volumes inherit
+# 1000:1000 on first use. /usr/local/share/nanobot-brew-seed holds the baked
+# Homebrew tree so the entrypoint can also seed empty host bind mounts (which
+# Docker does not auto-populate like named volumes).
 RUN mkdir -p /data/config/workspace \
         /data/home/.local/bin \
         /data/home/.local/share/uv/tools \
         /data/pixi \
         /data/brew \
         /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/brew \
-        /data/cache/pycache && \
-    chown -R nanobot:nanobot /data
+        /data/cache/pycache \
+        /usr/local/share/nanobot-brew-seed && \
+    chown -R nanobot:nanobot /data /usr/local/share/nanobot-brew-seed
 
-# Bake Homebrew into /data/brew. brew refuses to run as root, so the install
-# step runs as nanobot and the runtime user is restored afterwards.
+# Bake Homebrew into /data/brew, verify it, then move the tree into
+# /usr/local/share/nanobot-brew-seed within the same layer so empty host bind
+# mounts (e.g. ./data:/data) are seeded on first start without duplicating
+# layer size. brew refuses to run as root, so this step runs as nanobot.
 #
 # The source is pinned to a concrete Homebrew release tag, and the resulting
 # HEAD commit is verified before anything runs. A tag checkout also lets
@@ -205,12 +209,11 @@ RUN mkdir -p /data/config/workspace \
 # HOMEBREW_* variables at all. `brew --version` is answered by bin/brew without
 # Ruby; `brew config` is the first command that needs it and vendors Homebrew's
 # portable Ruby (brew has no system ruby on this image). Running it here bakes
-# that in, so a fresh /data/brew volume seeded from the image needs no network
-# to run brew at all. The scratch HOMEBREW_CACHE keeps downloaded tarballs and
-# the API index out of the image: /data/cache is a volume at runtime, so a
-# build-time copy there would be dead weight. No formulae are installed at
-# build time: bottles belong in the volume. Docs, manpages, completions and
-# .github are not used at runtime and are pruned after brew has been verified.
+# that in, so a fresh /data/brew needs no network to run brew at all. The
+# scratch HOMEBREW_CACHE keeps downloaded tarballs and the API index out of the
+# image. No formulae are installed at build time: bottles belong in /data/brew.
+# Docs, manpages, completions and .github are not used at runtime and are pruned
+# after brew has been verified.
 USER nanobot
 RUN set -eux; \
     git clone --depth 1 --single-branch --branch "$BREW_VERSION" \
@@ -229,7 +232,12 @@ RUN set -eux; \
     git -C /data/brew/Homebrew ls-files -d -z | \
         xargs -0 -r git -C /data/brew/Homebrew update-index --assume-unchanged; \
     rm -rf /tmp/brew-config.txt /tmp/brew-cache; \
-    brew --version
+    brew --version; \
+    for entry in /data/brew/* /data/brew/.[!.]* /data/brew/..?*; do \
+        [ -e "$entry" ] || [ -L "$entry" ] || continue; \
+        mv "$entry" /usr/local/share/nanobot-brew-seed/; \
+    done; \
+    test -x /usr/local/share/nanobot-brew-seed/bin/brew
 USER root
 
 # Container-side shim: make NANOBOT_HOME the default nanobot instance root.

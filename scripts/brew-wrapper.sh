@@ -6,11 +6,11 @@
 # image's HOMEBREW_* variables arrive here. Most of them brew can derive from
 # /data/brew/bin/brew itself, but one it cannot: without HOMEBREW_NO_AUTO_UPDATE
 # every `brew install` first runs `brew update`, a git fetch that rewrites the
-# repository in /data/brew. Measured on Windows + Docker Desktop, that write
-# burst repeatedly killed the Docker engine (docker exec -> HTTP 500, then the
-# WSL bootstrap failing with 0xc00000fd). This wrapper restores the image's
-# intent for the stripped-env path and then execs the real binary. An explicit
-# value in the environment always wins.
+# repository in /data/brew. On Windows + Docker Desktop, that write burst can
+# destabilise the Docker engine (docker exec -> HTTP 500, WSL bootstrap
+# 0xc00000fd). This wrapper restores the image's intent for the stripped-env
+# path and then execs the real binary. An explicit value in the environment
+# always wins.
 : "${HOMEBREW_PREFIX:=/data/brew}"
 : "${HOMEBREW_CELLAR:=$HOMEBREW_PREFIX/Cellar}"
 : "${HOMEBREW_REPOSITORY:=$HOMEBREW_PREFIX/Homebrew}"

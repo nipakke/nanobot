@@ -1,0 +1,24 @@
+# Test-only Compose override for scripts/smoke-test.sh.
+#
+# compose.yml pins `container_name: nanobot`, fixed host ports, and bind-mounts
+# ./data. The smoke test suite overrides all three so it never collides with an
+# operator's container, ports, or host ./data folder.
+services:
+  nanobot:
+    container_name: ${NANOBOT_SMOKE_CONTAINER:?scripts/smoke-test.sh must export NANOBOT_SMOKE_CONTAINER}
+    ports: !override
+      - "127.0.0.1:${NANOBOT_SMOKE_WEB_PORT:-18766}:8765"
+      - "127.0.0.1:${NANOBOT_SMOKE_HEALTH_PORT:-18791}:18790"
+    volumes: !override
+      - nanobot_config:/data/config
+      - nanobot_home:/data/home
+      - nanobot_pixi:/data/pixi
+      - nanobot_cache:/data/cache
+      - nanobot_brew:/data/brew
+
+volumes:
+  nanobot_config:
+  nanobot_home:
+  nanobot_pixi:
+  nanobot_cache:
+  nanobot_brew:

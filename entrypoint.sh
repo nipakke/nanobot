@@ -158,6 +158,10 @@ establish_symlink() {
 # cheap on later boots. find does not follow the .nanobot symlink.
 fix_ownership() {
     local dir
+    if [ -d /data ]; then
+        find /data -maxdepth 0 \( ! -uid "$NANOBOT_UID" -o ! -gid "$NANOBOT_GID" \) \
+            -exec chown -h "$NANOBOT_UID:$NANOBOT_GID" {} +
+    fi
     local -a roots=("$NANOBOT_HOME" "$HOME" "$PIXI_HOME" "$HOMEBREW_PREFIX" "$XDG_CACHE_HOME")
     for dir in "$PIXI_CACHE_DIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HOMEBREW_CACHE" "$PYTHONPYCACHEPREFIX"; do
         case "$dir" in
@@ -362,11 +366,34 @@ ensure_brew_cache_link() {
     log "linked $link -> $target"
 }
 
+# Seed $HOMEBREW_PREFIX from the image when empty (for example on a fresh host
+# bind mount such as ./data:/data, which Docker does not auto-populate).
+seed_brew() {
+    local seed="/usr/local/share/nanobot-brew-seed"
+    local entry
+    local -a entries=()
+
+    [ -d "$seed" ] || return 0
+    [ -x "$HOMEBREW_PREFIX/bin/brew" ] && return 0
+
+    for entry in "$seed"/* "$seed"/.[!.]* "$seed"/..?*; do
+        if [ -e "$entry" ] || [ -L "$entry" ]; then
+            entries+=("$entry")
+        fi
+    done
+    [ "${#entries[@]}" -gt 0 ] || return 0
+
+    log "seeding Homebrew into $HOMEBREW_PREFIX"
+    if ! cp -RP --preserve=mode,links -- "${entries[@]}" "$HOMEBREW_PREFIX/"; then
+        warn "could not seed Homebrew into $HOMEBREW_PREFIX; brew may be unavailable"
+    fi
+}
+
 # $HOME/.local/bin/brew -> /usr/local/bin/nanobot-brew. That wrapper restores
 # the image's HOMEBREW_* defaults (notably HOMEBREW_NO_AUTO_UPDATE) for the
 # WebUI app runner, whose env carries none of them; without it every WebUI
-# `brew install` starts with a git auto-update inside /data/brew, which has
-# killed the Docker engine on this host. It sits before /data/brew/bin on PATH.
+# `brew install` starts with a git auto-update inside /data/brew, which can
+# destabilise Docker Desktop on Windows/WSL. It sits before /data/brew/bin on PATH.
 ensure_brew_wrapper() {
     local link="$HOME/.local/bin/brew"
     local target="/usr/local/bin/nanobot-brew"
@@ -471,6 +498,7 @@ unprivileged_phase() {
     fi
 
     configure_npm
+    seed_brew
     ensure_brew_cache_link
     ensure_brew_wrapper
     ensure_workspace_agent_rules

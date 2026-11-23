@@ -5,7 +5,6 @@ Docker image and Compose stack for `nanobot-ai` with pixi-managed runtime tools,
 ## Where things live
 
 - `README.md` — authoritative user docs; read before changing behavior.
-- `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-design.md` — design, Revision 6, implemented and verified (177 acceptance checks A1–A22).
 - `.agents/references/` — durable project facts, e.g. `nanobot-image.md` for the image's layout and constraints.
 - `.agents/skills/` — repo procedures; load the matching skill before the task.
 - `.agents/lessons/` — the committed lesson log.

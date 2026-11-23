@@ -3,7 +3,7 @@
 Two image-level helpers run here at venv interpreter startup:
 
 1. NANOBOT_HOME is selected as nanobot's home. The image exposes
-   NANOBOT_HOME=/data/config, but nanobot 0.4.2 has no environment-variable
+   NANOBOT_HOME=/data/config, but upstream nanobot has no environment-variable
    equivalent for its root `--home` option. The /data/home/.nanobot symlink
    makes default CLI calls resolve to the same files, yet `nanobot status`
    would print the symlink path. Selecting /data/config here keeps the

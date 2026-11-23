@@ -1,6 +1,6 @@
 name: publish
 
-# Builds, verifies (A1-A22), and publishes docker.io/nipakke/nanobot.
+# Builds, verifies, and publishes docker.io/nipakke/nanobot.
 #
 # Runs ONLY on pushes to `main` that touch image files, or on a manual
 # `workflow_dispatch` run. Never runs on pull requests.
@@ -17,7 +17,7 @@ on:
       - .dockerignore
       - scripts/**
       - '!scripts/smoke-test.sh'
-      - '!scripts/smoke-compose.yaml'
+      - '!scripts/smoke-compose.yml'
       - etc/**
   workflow_dispatch:
     inputs:
@@ -94,7 +94,7 @@ jobs:
           cache-from: ${{ !env.ACT && 'type=gha' || '' }}
           cache-to: ${{ !env.ACT && 'type=gha,mode=max' || '' }}
 
-      - name: Acceptance suite (A1-A22)
+      - name: Run smoke tests
         env:
           NANOBOT_SMOKE_IMAGE: ${{ env.TEST_IMAGE }}
           NANOBOT_SMOKE_SKIP_BUILD: "1"

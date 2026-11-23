@@ -1,0 +1,40 @@
+name: nanobot
+
+services:
+  nanobot:
+    image: ${NANOBOT_IMAGE:-nipakke/nanobot:latest}
+    container_name: nanobot
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
+      EXTRA_PIXI_PACKAGES: ${EXTRA_PIXI_PACKAGES:-}
+      NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "8765:8765"
+      - "127.0.0.1:18790:18790"
+    volumes:
+      # Single host directory for everything under /data:
+      - ./data:/data
+      # Or mount the five trees separately (comment out ./data:/data above):
+      # - ./data/config:/data/config
+      # - ./data/home:/data/home
+      # - ./data/pixi:/data/pixi
+      # - ./data/brew:/data/brew
+      # - ./data/cache:/data/cache
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-B", "/usr/local/bin/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true

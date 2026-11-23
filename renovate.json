@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "nanobot-ai releases auto-merge immediately; everything else is batched into one monthly auto-merged PR; majors of other dependencies wait for approval. Every merge is gated by the A1-A22 acceptance suite (required check). See README 'Published image and updates'.",
+  "description": "nanobot-ai releases auto-merge immediately; everything else is batched into one monthly auto-merged PR; majors of other dependencies wait for approval. Every merge is gated by the smoke test suite (required check). See docs/development.md.",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "timezone": "Europe/Budapest",
   "enabledManagers": ["dockerfile", "github-actions", "custom.regex"],

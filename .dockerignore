@@ -8,11 +8,10 @@ docs/
 .agents/
 AGENTS.md
 README.md
-compose.yaml
-compose.build.yaml
-compose.bind.yaml
+compose.yml
+compose.build.yml
 scripts/smoke-test.sh
-scripts/smoke-compose.yaml
+scripts/smoke-compose.yml
 **/__pycache__
 *.pyc
 *.log
