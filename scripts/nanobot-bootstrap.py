@@ -15,9 +15,28 @@ from nanobot.cli.docker_bootstrap import initialize_config
 from nanobot.config.home import set_home_path
 
 # The exec tool builds a clean child env: it does not inherit the container
-# PATH, and pixi needs PIXI_HOME to find the global environments.
-EXEC_PATH_PREPEND = "/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin"
-EXEC_ALLOWED_ENV_KEYS = ("PIXI_HOME",)
+# PATH or image cache/runtime variables. Forward the non-secret layout, cache,
+# telemetry, and timezone variables so agent-run tools respect the five-tree
+# split instead of caching into /data/home or falling back to UTC.
+EXEC_ALLOWED_ENV_KEYS = (
+    "PIXI_HOME",
+    "PIXI_CACHE_DIR",
+    "PIXI_NO_TELEMETRY",
+    "XDG_CACHE_HOME",
+    "UV_CACHE_DIR",
+    "UV_LINK_MODE",
+    "PIP_CACHE_DIR",
+    "PYTHONPYCACHEPREFIX",
+    "NANOBOT_HOME",
+    "TZ",
+)
+
+
+def _default_exec_path_prepend() -> str:
+    pixi_home = os.environ.get("PIXI_HOME") or "/data/pixi"
+    home = os.environ.get("HOME") or "/data/home"
+    brew_prefix = os.environ.get("HOMEBREW_PREFIX") or "/data/brew"
+    return f"{pixi_home}/bin:{home}/.local/bin:{brew_prefix}/bin:/app/.venv/bin"
 
 
 def set_exec_defaults(path: Path) -> None:
@@ -30,7 +49,7 @@ def set_exec_defaults(path: Path) -> None:
     exec_config = data.setdefault("tools", {}).setdefault("exec", {})
     changed = False
     if not exec_config.get("pathPrepend"):
-        exec_config["pathPrepend"] = EXEC_PATH_PREPEND
+        exec_config["pathPrepend"] = _default_exec_path_prepend()
         changed = True
     allowed = exec_config.setdefault("allowedEnvKeys", [])
     for key in EXEC_ALLOWED_ENV_KEYS:

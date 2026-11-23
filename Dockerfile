@@ -5,21 +5,47 @@
 # ---------------------------------------------------------------------------
 ARG NANOBOT_VERSION=0.4.2
 ARG PIXI_VERSION=v0.84.2
+ARG BUNDLE_TUI=0
 ARG UID=1000
 ARG GID=1000
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS nanobot
 
 ARG NANOBOT_VERSION
+ARG BUNDLE_TUI
 
 ENV UV_PYTHON_PREFERENCE=only-system \
-    UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1
+    UV_LINK_MODE=copy
 
 # Pin the interpreter to the system Python present in this stage; stage 3 also
 # ships /usr/local/bin/python3.12 so the venv resolves after the copy.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv --python /usr/local/bin/python3.12 /app/.venv && \
     uv pip install --python /app/.venv/bin/python "nanobot-ai==${NANOBOT_VERSION}"
+
+# The nanobot wheel bundles a ~123 MiB native TUI binary. It is removed here, in
+# the builder stage, so it never enters any layer of the final image (removing
+# it in the runtime stage would leave a whiteout instead of saving space). The
+# upstream launcher then falls back to downloading the checksum-verified release
+# asset into the persistent data dir on first TUI use. Offline/air-gapped builds
+# set BUNDLE_TUI=1 to keep the binary.
+#
+# Bytecode is not compiled at build time either. The runtime sets
+# PYTHONPYCACHEPREFIX=/data/cache/pycache, so Python compiles once on first use
+# into the disposable cache tree; recreates reuse it and nothing lands in the
+# image or the writable home tree.
+RUN set -eux; \
+    tui_dir=/app/.venv/lib/python3.12/site-packages/nanobot/tui/bin; \
+    if [ -d "$tui_dir" ]; then \
+        if [ "$BUNDLE_TUI" = "1" ]; then \
+            test -n "$(find "$tui_dir" -maxdepth 1 -type f -name 'nanobot-tui-linux-*' -print -quit)"; \
+        else \
+            rm -f "$tui_dir"/nanobot-tui-linux-*; \
+            test -z "$(find "$tui_dir" -maxdepth 1 -type f -name 'nanobot-tui-linux-*' -print -quit)"; \
+        fi; \
+    fi; \
+    find /app/.venv -type f -name '*.pyc' -delete; \
+    find /app/.venv -type d -name __pycache__ -empty -delete; \
+    test -z "$(find /app/.venv -type f -name '*.pyc' -print -quit)"
 
 # ---------------------------------------------------------------------------
 # Stage 2: download the pinned pixi release binary (statically linked, musl).
@@ -66,6 +92,8 @@ FROM python:3.12-slim-bookworm AS runtime
 ARG NANOBOT_VERSION
 ARG UID
 ARG GID
+ARG BREW_VERSION=7.0.16
+ARG BREW_COMMIT=7ef183d10e7d6e5620d7124b744b1dfbf69fc108
 
 LABEL org.opencontainers.image.title="nanobot + pixi" \
       org.opencontainers.image.description="nanobot-ai with pixi-managed runtime tools and persistent /data trees" \
@@ -78,6 +106,10 @@ LABEL org.opencontainers.image.title="nanobot + pixi" \
 # Landlock sandbox, which writes the formula API cache and fails with EACCES on
 # a cold cache. With /usr/bin/unzip present, which("unzip") succeeds and that
 # sandboxed lookup is skipped.
+#
+# The system pip is deliberately kept: it lives in the base-image layer, so
+# deleting it here would only add a whiteout (merged filesystem shrinks, image
+# size does not). Removing it would need a different base or a stage rebuild.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -125,6 +157,7 @@ ENV HOME=/data/home \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
+    PYTHONPYCACHEPREFIX=/data/cache/pycache \
     UV_LINK_MODE=copy \
     NANOBOT_VERSION=${NANOBOT_VERSION}
 
@@ -142,11 +175,17 @@ RUN mkdir -p /data/config/workspace \
         /data/home/.local/share/uv/tools \
         /data/pixi \
         /data/brew \
-        /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/brew && \
+        /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/brew \
+        /data/cache/pycache && \
     chown -R nanobot:nanobot /data
 
 # Bake Homebrew into /data/brew. brew refuses to run as root, so the install
 # step runs as nanobot and the runtime user is restored afterwards.
+#
+# The source is pinned to a concrete Homebrew release tag, and the resulting
+# HEAD commit is verified before anything runs. A tag checkout also lets
+# `brew --version` report the concrete version instead of ">=4.3.0 (shallow or
+# no git repository)". Keep .git: Homebrew derives that version from it.
 #
 # A depth-1 clone plus the prefix/bin/brew symlink is the official custom-prefix
 # layout: bin/brew derives HOMEBREW_PREFIX from its own resolved path, which is
@@ -158,40 +197,42 @@ RUN mkdir -p /data/config/workspace \
 # to run brew at all. The scratch HOMEBREW_CACHE keeps downloaded tarballs and
 # the API index out of the image: /data/cache is a volume at runtime, so a
 # build-time copy there would be dead weight. No formulae are installed at
-# build time: bottles belong in the volume.
+# build time: bottles belong in the volume. Docs, manpages, completions and
+# .github are not used at runtime and are pruned after brew has been verified.
 USER nanobot
-RUN git clone --depth 1 --single-branch https://github.com/Homebrew/brew /data/brew/Homebrew && \
-    mkdir -p /data/brew/bin && \
-    ln -s ../Homebrew/bin/brew /data/brew/bin/brew && \
-    HOMEBREW_CACHE=/tmp/brew-cache brew --version && \
-    HOMEBREW_CACHE=/tmp/brew-cache brew config > /tmp/brew-config.txt && \
-    grep -q '^Homebrew Ruby:' /tmp/brew-config.txt && \
-    rm -rf /tmp/brew-config.txt /tmp/brew-cache
+RUN set -eux; \
+    git clone --depth 1 --single-branch --branch "$BREW_VERSION" \
+        https://github.com/Homebrew/brew /data/brew/Homebrew; \
+    test "$(git -C /data/brew/Homebrew rev-parse HEAD)" = "$BREW_COMMIT"; \
+    test "$(git -C /data/brew/Homebrew describe --tags --exact-match)" = "$BREW_VERSION"; \
+    mkdir -p /data/brew/bin; \
+    ln -s ../Homebrew/bin/brew /data/brew/bin/brew; \
+    HOMEBREW_CACHE=/tmp/brew-cache brew --version; \
+    HOMEBREW_CACHE=/tmp/brew-cache brew config > /tmp/brew-config.txt; \
+    grep -q '^Homebrew Ruby:' /tmp/brew-config.txt; \
+    rm -rf /data/brew/Homebrew/.github \
+        /data/brew/Homebrew/docs \
+        /data/brew/Homebrew/manpages \
+        /data/brew/Homebrew/completions; \
+    git -C /data/brew/Homebrew ls-files -d -z | \
+        xargs -0 -r git -C /data/brew/Homebrew update-index --assume-unchanged; \
+    rm -rf /tmp/brew-config.txt /tmp/brew-cache; \
+    brew --version
 USER root
 
 # Container-side shim: make NANOBOT_HOME the default nanobot instance root.
 # Without it, default CLI calls print the symlink path (/data/home/.nanobot)
 # instead of /data/config, even though both name the same files.
-COPY scripts/sitecustomize.py /app/.venv/lib/python3.12/site-packages/sitecustomize.py
-RUN chown nanobot:nanobot /app/.venv/lib/python3.12/site-packages/sitecustomize.py
+COPY --chown=nanobot:nanobot scripts/sitecustomize.py /app/.venv/lib/python3.12/site-packages/sitecustomize.py
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
-    chmod 0755 /usr/local/bin/entrypoint.sh
-COPY scripts/nanobot-bootstrap.py /usr/local/bin/nanobot-bootstrap.py
-COPY scripts/nanobot-channels.py /usr/local/bin/nanobot-channels.py
-COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py
-COPY scripts/workspace-agents-env.py /usr/local/bin/workspace-agents-env.py
 COPY scripts/brew-wrapper.sh /usr/local/bin/nanobot-brew
-RUN sed -i 's/\r$//' /usr/local/bin/nanobot-brew && \
-    chmod 0755 /usr/local/bin/nanobot-bootstrap.py \
-        /usr/local/bin/nanobot-channels.py \
-        /usr/local/bin/healthcheck.py \
-        /usr/local/bin/workspace-agents-env.py \
-        /usr/local/bin/nanobot-brew
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh /usr/local/bin/nanobot-brew && \
+    chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/nanobot-brew
+COPY --chmod=0755 scripts/nanobot-bootstrap.py scripts/nanobot-channels.py \
+    scripts/healthcheck.py scripts/workspace-agents-env.py /usr/local/bin/
 
-COPY etc/nanobot-env.md /etc/nanobot-env.md
-RUN chmod 0444 /etc/nanobot-env.md
+COPY --chmod=0444 etc/nanobot-env.md /etc/nanobot-env.md
 
 # Start as root only for the entrypoint's setup phase; it drops to nanobot.
 USER root

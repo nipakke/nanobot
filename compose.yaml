@@ -16,10 +16,10 @@ services:
       TZ: ${TZ:-UTC}
       NANOBOT_HEALTH_PORT: ${NANOBOT_HEALTH_PORT:-18790}
     ports:
-      - "${NANOBOT_WEB_PORT:-8765}:8765"
-      # Host side is configurable; the container side stays 18790 unless
-      # gateway.port in config.json was changed.
-      - "127.0.0.1:${NANOBOT_HEALTH_HOST_PORT:-18790}:18790"
+      - "${NANOBOT_WEB_BIND:-0.0.0.0}:${NANOBOT_WEB_PORT:-8765}:8765"
+      # Host side is configurable; the container side follows NANOBOT_HEALTH_PORT
+      # (18790 unless gateway.port in config.json was changed).
+      - "127.0.0.1:${NANOBOT_HEALTH_HOST_PORT:-18790}:${NANOBOT_HEALTH_PORT:-18790}"
     volumes:
       - nanobot_config:/data/config
       - nanobot_home:/data/home

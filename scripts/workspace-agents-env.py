@@ -38,9 +38,10 @@ BODY = (
     "  `/data/pixi` and survive restarts, recreates and image upgrades.",
     "- Install JS tools with `npx <pkg>` (cache in `$HOME/.npm`) or",
     "  `npm i -g <pkg>`, whose binaries land in `~/.local/bin` (on `PATH`).",
-    "- WebUI Apps install with brew, npm or pip. Homebrew lives at `/data/brew`",
-    "  on its own volume; `brew install <pkg>` puts binaries in `/data/brew/bin`,",
-    "  which is on `PATH`.",
+    "- Homebrew lives at `/data/brew` (its own volume) solely for WebUI Apps",
+    "  whose install command uses `brew` (binaries land in `/data/brew/bin`, on",
+    "  `PATH`). Do not use `brew` for ad-hoc tool installs; use",
+    "  `pixi global install <pkg>` instead.",
     "- `/app/.venv` is ephemeral: anything pip-installed there is gone after a",
     "  recreate. Channel dependencies are the exception, replayed at startup.",
     "- `nanobot update` is rejected by design; upgrades come from an image",
@@ -93,7 +94,7 @@ def seed_templates(workspace: Path) -> None:
 
 
 def main(argv: list[str]) -> int:
-    seed = SEED_FLAG in argv
+    seed = SEED_FLAG in argv[1:]
     operands = [arg for arg in argv[1:] if arg != SEED_FLAG]
     if len(operands) != 1:
         print(

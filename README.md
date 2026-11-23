@@ -12,6 +12,9 @@ Run `nanobot-ai==0.4.2` in a reproducible Debian container with:
   can be reset separately;
 - an image-baked, ephemeral `/app/.venv` that changes only with the image tag
   (writable by `nanobot` for channel dependency installs, but never mounted);
+- no `.pyc` baked into the image and no bundled native TUI binary by default:
+  bytecode compiles on first use into the disposable cache, and the TUI
+  downloads into `/data/config` when first needed;
 - optional channel Python dependencies installed at startup from
   `NANOBOT_CHANNELS`, replayed from the persistent cache on recreate;
 - a marked environment-rules block maintained in the workspace `AGENTS.md`, the
@@ -96,8 +99,22 @@ args:
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-Build args: `NANOBOT_VERSION=0.4.2`, `PIXI_VERSION=v0.84.2`, `UID=1000`,
+Build args: `NANOBOT_VERSION=0.4.2`, `PIXI_VERSION=v0.84.2`,
+`BUNDLE_TUI=0`, `BREW_VERSION=7.0.16`,
+`BREW_COMMIT=7ef183d10e7d6e5620d7124b744b1dfbf69fc108`, `UID=1000`,
 `GID=1000`.
+
+`BUNDLE_TUI=1` keeps the ~123 MiB native TUI binary in the image for
+offline/air-gapped hosts; the default `0` removes it from the build stage, so
+it is absent from every layer of the final image and the launcher downloads it
+on first use instead (see [Native TUI](#native-tui)). `BREW_VERSION` and
+`BREW_COMMIT` pin the Homebrew checkout and are verified against each other at
+build time; bump both together.
+
+```sh
+# Offline bundle: keep the native TUI inside the image
+BUNDLE_TUI=1 docker compose -f compose.yaml -f compose.build.yaml build
+```
 
 Multi-arch (publishing is out of scope):
 
@@ -113,7 +130,7 @@ docker buildx build --platform linux/amd64,linux/arm64 .
 | `/data/home` | `HOME`, uv tool dirs, `~/.local/bin`, `~/.npm` | dotfiles, SSH/CLI config, user files, uv tools, npm globals | resets home; config/pixi/brew/cache survive |
 | `/data/pixi` | `PIXI_HOME` | pixi global envs, exposed binaries, global manifest | resets tools; config/home/brew/cache survive |
 | `/data/brew` | `HOMEBREW_PREFIX` | Homebrew repo, Cellar, formula binaries | resets brew formulas; everything else survives |
-| `/data/cache` | `XDG_CACHE_HOME`, pixi/uv/pip/brew caches | 100% disposable caches | safe to delete; tools/config survive |
+| `/data/cache` | `XDG_CACHE_HOME`, pixi/uv/pip/brew caches, `PYTHONPYCACHEPREFIX` | 100% disposable caches, including compiled bytecode | safe to delete; tools/config survive; the first start after a wipe recompiles once |
 
 With `compose.bind.yaml` the first, second, third, and fifth paths are
 `./data/config`, `./data/home`, `./data/pixi`, and `./data/cache` on the host;
@@ -127,9 +144,12 @@ immediately.
 The agent's exec tool builds a clean child environment instead of inheriting
 the container environment, so bootstrap gives a new config two exec defaults:
 `tools.exec.pathPrepend` names those four directories, and
-`tools.exec.allowedEnvKeys` includes `PIXI_HOME` so `pixi global list` sees the
-installations. An existing config needs the same two values (WebUI or
-`config.json`) before the agent can see pixi, `npm`, and `brew` tools.
+`tools.exec.allowedEnvKeys` forwards `PIXI_HOME`, `PIXI_CACHE_DIR`,
+`PIXI_NO_TELEMETRY`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `UV_LINK_MODE`,
+`PIP_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, `NANOBOT_HOME`, and `TZ` so agent-run
+tools see pixi environments, keep caches in `/data/cache`, and respect the
+configured timezone. An existing config needs the same values (WebUI or
+`config.json`) before the agent can see pixi, `npm`, and `brew` tools cleanly.
 
 Image:
 
@@ -229,8 +249,8 @@ Because the image user is root, **plain `docker exec` also runs as root** and
 can create root-owned files in `/data`. Always pass `-u nanobot`:
 
 ```sh
-docker compose exec -u nanobot nanobot status
-docker compose exec -it -u nanobot nanobot
+docker compose exec -u nanobot nanobot nanobot status
+docker compose exec -it -u nanobot nanobot nanobot
 ```
 
 This is a Docker constraint, not a preference: the image cannot have a default
@@ -266,14 +286,17 @@ nothing reads it automatically. What the agent does read is the workspace
 Homebrew is installed into the image at `/data/brew` and persisted on its own
 named volume (`nanobot_brew`). It exists for WebUI Apps whose install command is
 `brew install <pkg>`: those binaries land in `/data/brew/bin`, which is on
-`PATH`, and survive restarts, recreates and image upgrades. The image grows from
-1.09 GB to 1.20 GB (+105.9 MiB), which is Homebrew's git checkout plus its
-vendored Ruby.
+`PATH`, and survive restarts, recreates and image upgrades. The baked tree is
+about 80 MB (mostly Homebrew's vendored portable Ruby; its image layer is about
+83 MB), and the source is pinned to release 7.0.16 at commit
+`7ef183d10e7d6e5620d7124b744b1dfbf69fc108`, verified at build time. `docs`,
+`manpages`, `completions` and `.github` are pruned; `.git` stays because
+Homebrew reports its concrete version from it.
 
 ```sh
-docker compose exec -u nanobot brew --version      # Homebrew >=4.3.0
-docker compose exec -u nanobot brew --prefix       # /data/brew
-docker compose exec -u nanobot brew install tree   # -> /data/brew/bin/tree
+docker compose exec -u nanobot nanobot brew --version      # Homebrew 7.0.16
+docker compose exec -u nanobot nanobot brew --prefix       # /data/brew
+docker compose exec -u nanobot nanobot brew install tree   # -> /data/brew/bin/tree
 ```
 
 - **Why a separate volume, not `./data`.** Homebrew rewrites its own git
@@ -308,15 +331,15 @@ docker compose exec -u nanobot brew install tree   # -> /data/brew/bin/tree
   cold copy: `docker run --rm -v nanobot_nanobot_brew:/data/brew -v "$PWD":/out
   -u nanobot <image> tar -C /data -czf /out/brew.tgz brew`.
 - Brew is never updated or upgraded by the entrypoint. It is pinned by the
-  image; rebuilding with a new image refreshes it.
+  image; rebuild with new `BREW_VERSION`/`BREW_COMMIT` values to refresh it.
 
 ### The brew wrapper on PATH
 
 `scripts/brew-wrapper.sh` is copied into the image as
 `/usr/local/bin/nanobot-brew`, and the `nanobot` phase of the entrypoint links
 `$HOME/.local/bin/brew` to it. Because `$HOME/.local/bin` precedes
-`/data/brew/bin` on `PATH`, both `docker compose exec -u nanobot brew ...` and
-a WebUI `brew install` reach the wrapper instead of the binary directly.
+`/data/brew/bin` on `PATH`, both `docker compose exec -u nanobot nanobot brew ...`
+and a WebUI `brew install` reach the wrapper instead of the binary directly.
 
 The wrapper restores the image's defaults and then `exec`s the real binary:
 
@@ -330,9 +353,10 @@ HOMEBREW_NO_ANALYTICS=1
 HOMEBREW_NO_ENV_HINTS=1
 ```
 
-Each value is a shell default (`: "${VAR:=value}"`), so a value already in the
-environment wins: `HOMEBREW_NO_AUTO_UPDATE=0` reaches brew unchanged, and the
-same applies to every other variable in the list.
+Path values use `:=` defaults, while the three boolean flags use `=` defaults
+(`: "${VAR=1}"`). Because Homebrew treats any non-empty value (including `0`) as
+set, pass an empty value to clear a boolean flag (`HOMEBREW_NO_AUTO_UPDATE= brew ...`);
+an explicit value in the environment always wins.
 
 `HOMEBREW_NO_AUTO_UPDATE` is the one that matters. Without it, every WebUI
 `brew install` starts with `brew update`, a git fetch that rewrites the
@@ -361,8 +385,8 @@ Result: globally installed JS CLIs appear in `/data/home/.local/bin`, are on
 `PATH` (also inside the stripped env), and survive recreates and upgrades.
 
 ```sh
-docker compose exec -u nanobot npm install -g cowsay
-docker compose exec -u nanobot sh -c 'command -v cowsay'   # /data/home/.local/bin/cowsay
+docker compose exec -u nanobot nanobot npm install -g cowsay
+docker compose exec -u nanobot nanobot sh -c 'command -v cowsay'   # /data/home/.local/bin/cowsay
 ```
 
 `npx <pkg>` needs no prefix: its cache is `$HOME/.npm`, in the persistent home
@@ -394,8 +418,9 @@ the agent context, and skips a file while it still equals the bundled template.
 - maintains one block between `<!-- nanobot-image-env:begin -->` and
   `<!-- nanobot-image-env:end -->` stating the durable rules: no `apt`/`apk` and
   no `sudo`, `pixi global install` for native tools, `npx`/`npm i -g` for JS
-  tools, brew at `/data/brew`, `/app/.venv` is ephemeral, `nanobot update` is
-  rejected, and which `/data` trees survive what.
+  tools, brew at `/data/brew` reserved for WebUI Apps (not ad-hoc installs),
+  `/app/.venv` is ephemeral, `nanobot update` is rejected, and which `/data`
+  trees survive what.
 
 Re-running is idempotent: the block is replaced in place, never duplicated, and
 text outside the markers is left untouched. Because the seeded file no longer
@@ -443,17 +468,17 @@ ad-hoc `docker exec ... nanobot ...` commands are unaffected.
 ## Commands
 
 ```sh
-# Status (note -u nanobot)
-docker compose exec -u nanobot nanobot status
+# Status (note -u nanobot; first `nanobot` is the Compose service, second is the CLI)
+docker compose exec -u nanobot nanobot nanobot status
 
 # Interactive TUI
-docker compose exec -it -u nanobot nanobot
+docker compose exec -it -u nanobot nanobot nanobot
 
 # Logs
 docker compose logs -f nanobot
 
 # Health (container side)
-docker compose exec -u nanobot /app/.venv/bin/python -B /usr/local/bin/healthcheck.py
+docker compose exec -u nanobot nanobot /app/.venv/bin/python -B /usr/local/bin/healthcheck.py
 
 # Health (host side; NANOBOT_HEALTH_HOST_PORT is the host port)
 curl -fsS http://127.0.0.1:18790/health
@@ -466,8 +491,28 @@ curl -fsS http://127.0.0.1:18790/health
   healthcheck reads. It defaults to `18790` and should only change together
   with `gateway.port` in `config.json`.
 
-The WebUI port is `${NANOBOT_WEB_PORT:-8765}` on the host, mapped to `8765` in
-the container.
+The WebUI port is `${NANOBOT_WEB_BIND:-0.0.0.0}:${NANOBOT_WEB_PORT:-8765}` on
+the host, mapped to `8765` in the container. Set `NANOBOT_WEB_BIND=127.0.0.1` in
+`.env` to restrict plaintext WebUI access to localhost.
+
+### Native TUI
+
+The default image does not contain the ~123 MiB native TUI binary. The upstream
+launcher notices the packaged path is absent and downloads the
+checksum-verified release asset for `NANOBOT_VERSION` on first use, into
+`/data/config/bin/tui/<version>`; recreates reuse that copy. `NANOBOT_TUI_NO_DOWNLOAD=1`
+disables the download and leaves the launcher's documented
+`TuiUnavailableError` (`use nanobot agent --classic`). For air-gapped hosts,
+build with `BUNDLE_TUI=1` to keep the binary in the image; the packaged path
+then resolves without network.
+
+### Python bytecode
+
+The image ships no `.pyc`. `PYTHONPYCACHEPREFIX=/data/cache/pycache` makes the
+first start compile imported modules once into the disposable cache tree;
+restarts and recreates reuse those files, and wiping `/data/cache` only costs
+one recompile. The healthcheck keeps `-B`, so Docker's root-executed check
+never writes bytecode.
 
 ## Time zone
 
@@ -475,7 +520,7 @@ Set `TZ` in `.env` (for example `Europe/Budapest`) and recreate the container:
 
 ```sh
 docker compose up -d --force-recreate
-docker compose exec -u nanobot date
+docker compose exec -u nanobot nanobot date
 ```
 
 ## Upgrades
@@ -506,9 +551,10 @@ What survives an image upgrade, per install mechanism: `brew` formulas
 (`/data/brew`), `npm -g` packages (`/data/home/.local`), `uv tool` installs
 (`/data/home/.local`), pixi globals (`/data/pixi`), config/sessions/workspace
 (`/data/config`). What does not: `pip install` into `/app/.venv` and anything
-else in the root filesystem. A rebuilt image brings a fresh, newer Homebrew;
-existing Cellar entries from the old volume still work, and `brew upgrade` is
-available if a formula needs refreshing.
+else in the root filesystem. A rebuilt image brings the Homebrew release pinned
+by `BREW_VERSION`/`BREW_COMMIT`; existing Cellar entries from the old volume
+still work, and `brew upgrade` is available if a formula needs refreshing. The
+TUI download cache in `/data/config/bin/tui` also survives.
 
 The workspace `AGENTS.md` block is rewritten in place on start when its wording
 changes, so an upgraded image updates the agent's rules without duplicating
@@ -551,19 +597,12 @@ directories on first start and the entrypoint's root phase adopts them. Back up
 by stopping the stack and copying `./data`; `./data/cache` can be deleted at
 any time.
 
-Verified on this host (Windows + Docker Desktop): fresh empty directories
-produce a healthy start, `/data/home/.nanobot -> /data/config` is created and
-kept across a recreate and `down`/`up`, `nanobot` can write in all four trees,
-`config.json`, sessions and workspace survive `down` + `up`, `.ssh` keeps mode
-`0700` across a recreate, and `NANOBOT_CHANNELS` installs land in `/app/.venv`
-with the wheels cached in `./data/cache/uv`. Repeatable check:
-
-```powershell
-powershell -File scripts/bind-mode-check.ps1 -Root "$env:TEMP\nanobot-bind"
-```
-
-The check stages the Compose files into that scratch root, so it never touches
-`./data`.
+Verified in bind mode: fresh empty directories produce a healthy start,
+`/data/home/.nanobot -> /data/config` is created and kept across a recreate and
+`down`/`up`, `nanobot` can write in all four trees, `config.json`, sessions and
+workspace survive `down` + `up`, `.ssh` keeps mode `0700` across a recreate, and
+`NANOBOT_CHANNELS` installs land in `/app/.venv` with the wheels cached in
+`./data/cache/uv`.
 
 Windows notes: Docker Desktop's filesystem layer reports the four directories
 as `0777` owned by `nanobot`. Unix modes are emulated and Windows ACLs are not
@@ -644,10 +683,3 @@ can run next to a live stack. Both host ports are overridable with
 excluded port ranges cover the defaults, Docker Desktop fails with
 `forwards/expose ... 500` and an access-denied bind, so pick free ports. It
 cleans up only its own containers, volumes, and network.
-
-Bind-mode persistence has its own repeatable check (see
-[Host support and persistence modes](#host-support-and-persistence-modes)):
-
-```powershell
-powershell -File scripts/bind-mode-check.ps1 -Root "$env:TEMP\nanobot-bind"
-```

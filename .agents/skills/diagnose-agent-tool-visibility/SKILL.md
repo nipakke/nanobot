@@ -40,7 +40,9 @@ directories, and `pixi` cannot find its environments without `PIXI_HOME`.
 
 4. Set `pathPrepend` to
    `/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin` and add
-   `PIXI_HOME` to `allowedEnvKeys`. New configs get both from
+   `PIXI_HOME`, `PIXI_CACHE_DIR`, `PIXI_NO_TELEMETRY`, `XDG_CACHE_HOME`,
+   `UV_CACHE_DIR`, `UV_LINK_MODE`, `PIP_CACHE_DIR`, `PYTHONPYCACHEPREFIX`,
+   `NANOBOT_HOME`, and `TZ` to `allowedEnvKeys`. New configs get both from
    `scripts/nanobot-bootstrap.py`; an existing config needs the WebUI or a
    manual edit.
 

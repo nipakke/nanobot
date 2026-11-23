@@ -11,13 +11,15 @@ You are the `nanobot` user (UID/GID 1000), not root.
 | Tool | Command | Binaries land in | Persists? |
 |---|---|---|---|
 | native / CLI (preferred) | `pixi global install <pkg>` | `/data/pixi/bin` | yes |
-| Homebrew formulas | `brew install <pkg>` | `/data/brew/bin` | yes (own volume) |
+| WebUI Apps only (Homebrew) | WebUI Apps screen (`brew`) | `/data/brew/bin` | yes (own volume) |
 | JS one-shot | `npx <pkg>` | cache in `$HOME/.npm` | cache yes |
 | JS global | `npm i -g <pkg>` | `/data/home/.local/bin` | yes |
 | Python (image only) | `pip install <pkg>` | `/app/.venv` | **no** |
 
 `pixi search <term>`, `pixi info <pkg>`, `pixi global list` discover packages.
-Homebrew lives at `/data/brew`; `brew --prefix` reports it.
+Homebrew lives at `/data/brew` (`brew --prefix` reports it) and is reserved for
+WebUI Apps; do not use `brew` for ad-hoc tool installs—use `pixi global install`
+instead.
 
 **WebUI Apps**: brew ✅, npm ✅, pip ❌ for durability — a pip install writes to
 `/app/.venv`, which is rebuilt from the image on every recreate.
@@ -30,7 +32,7 @@ Homebrew lives at `/data/brew`; `brew --prefix` reports it.
 | `/data/home` | dotfiles, SSH/CLI config, `~/.local` bins, uv tools | yes |
 | `/data/pixi` | pixi global environments and tools | yes |
 | `/data/brew` | Homebrew prefix: repo, Cellar, bottles | yes |
-| `/data/cache` | pixi/uv/pip/brew caches | disposable; safe to wipe |
+| `/data/cache` | pixi/uv/pip/brew caches and Python `pycache` | disposable; safe to wipe |
 
 - `/app/.venv` (the nanobot Python install) and the rest of the root filesystem
   are **ephemeral**. Changes there disappear when the container is recreated.

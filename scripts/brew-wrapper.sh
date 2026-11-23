@@ -12,13 +12,16 @@
 # intent for the stripped-env path and then execs the real binary. An explicit
 # value in the environment always wins.
 : "${HOMEBREW_PREFIX:=/data/brew}"
-: "${HOMEBREW_CELLAR:=/data/brew/Cellar}"
-: "${HOMEBREW_REPOSITORY:=/data/brew/Homebrew}"
+: "${HOMEBREW_CELLAR:=$HOMEBREW_PREFIX/Cellar}"
+: "${HOMEBREW_REPOSITORY:=$HOMEBREW_PREFIX/Homebrew}"
 : "${HOMEBREW_CACHE:=/data/cache/brew}"
-: "${HOMEBREW_NO_AUTO_UPDATE:=1}"
-: "${HOMEBREW_NO_ANALYTICS:=1}"
-: "${HOMEBREW_NO_ENV_HINTS:=1}"
+# Use `=` (not `:=`) for Homebrew boolean flags so an explicit empty value
+# (e.g. `HOMEBREW_NO_AUTO_UPDATE=`) clears the default instead of being
+# rewritten back to 1. Homebrew treats any non-empty value (including `0`) as set.
+: "${HOMEBREW_NO_AUTO_UPDATE=1}"
+: "${HOMEBREW_NO_ANALYTICS=1}"
+: "${HOMEBREW_NO_ENV_HINTS=1}"
 export HOMEBREW_PREFIX HOMEBREW_CELLAR HOMEBREW_REPOSITORY HOMEBREW_CACHE
 export HOMEBREW_NO_AUTO_UPDATE HOMEBREW_NO_ANALYTICS HOMEBREW_NO_ENV_HINTS
 
-exec /data/brew/bin/brew "$@"
+exec "${HOMEBREW_PREFIX}/bin/brew" "$@"

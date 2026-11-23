@@ -14,7 +14,9 @@ gateway still starts.
 
 from __future__ import annotations
 
+import importlib
 import os
+import shlex
 import subprocess
 import sys
 
@@ -83,13 +85,14 @@ def install(targets: list[tuple[str, list[str]]]) -> bool:
         detail = (proc.stderr or proc.stdout or "").strip()
         for line in detail.splitlines()[-12:]:
             warn(line)
-        warn("retry with: " + " ".join(command))
+        warn("retry with: " + shlex.join(command))
         return False
 
+    importlib.invalidate_caches()
     missing = [name for name, deps in targets if not extra_installed(name, deps)]
     if missing:
         warn("uv reported success but these channels still miss requirements: " + ", ".join(missing))
-        warn("retry with: " + " ".join(command))
+        warn("retry with: " + shlex.join(command))
         return False
 
     summary = last_line(proc.stdout) or last_line(proc.stderr)

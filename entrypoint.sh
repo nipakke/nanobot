@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # nanobot container entrypoint.
 #
-# Starts as root only for the setup phase (create/chown the four persistent
+# Starts as root only for the setup phase (create/chown the five persistent
 # trees and establish the ~/.nanobot -> /data/config symlink), then drops to
 # the non-root nanobot user with setpriv. The unprivileged phase applies pixi
 # extras, bootstraps the config when needed, and execs the requested command.
@@ -25,6 +25,7 @@ apply_defaults() {
     export UV_TOOL_DIR="${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}"
     export UV_TOOL_BIN_DIR="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
     export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$XDG_CACHE_HOME/pip}"
+    export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-$XDG_CACHE_HOME/pycache}"
     export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/data/brew}"
     export HOMEBREW_CELLAR="${HOMEBREW_CELLAR:-$HOMEBREW_PREFIX/Cellar}"
     export HOMEBREW_REPOSITORY="${HOMEBREW_REPOSITORY:-$HOMEBREW_PREFIX/Homebrew}"
@@ -35,8 +36,12 @@ apply_defaults() {
     export npm_config_prefix="${npm_config_prefix:-$HOME/.local}"
     export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
     export PIXI_NO_TELEMETRY="${PIXI_NO_TELEMETRY:-1}"
-    export NANOBOT_UID="${NANOBOT_UID:-1000}"
-    export NANOBOT_GID="${NANOBOT_GID:-1000}"
+    local uid gid
+    uid="$(id -u "$NANOBOT_USER" 2>/dev/null || true)"
+    gid="$(getent group "$NANOBOT_GROUP" 2>/dev/null | cut -d: -f3 || true)"
+    [ -n "$gid" ] || gid="$(id -g "$NANOBOT_USER" 2>/dev/null || true)"
+    export NANOBOT_UID="${uid:-${NANOBOT_UID:-1000}}"
+    export NANOBOT_GID="${gid:-${NANOBOT_GID:-1000}}"
 }
 
 is_mount_point() {
@@ -94,11 +99,39 @@ establish_symlink() {
                 log "removed empty directory $link"
             elif ! target_has_data "$target"; then
                 # Migration: only when the intended target holds no user data.
-                # Ownership is fixed by the scan below; preserving metadata on
-                # the target root needs CAP_FOWNER, which is deliberately not
-                # granted. Copy contents and symlinks only.
-                cp -R --preserve=links "$link/." "$target/" ||
-                    die "migration copy from $link to $target failed; source left untouched"
+                # Stage into a temp dir inside $target so a mid-copy failure
+                # never leaves partial user data behind. Copy child entries
+                # (not $link/.) with --preserve=mode,links so file modes and
+                # symlinks survive without touching $target's root metadata
+                # (which requires CAP_FOWNER). Ownership is fixed below.
+                local stage entry
+                local -a entries=()
+                stage="$target/.nanobot-migration.$$"
+                mkdir -p "$stage" || die "could not create migration staging dir $stage"
+                for entry in "$link"/* "$link"/.[!.]* "$link"/..?*; do
+                    if [ -e "$entry" ] || [ -L "$entry" ]; then
+                        entries+=("$entry")
+                    fi
+                done
+                if [ "${#entries[@]}" -gt 0 ]; then
+                    if ! cp -RP --preserve=mode,links -- "${entries[@]}" "$stage/"; then
+                        rm -rf "$stage"
+                        die "migration copy from $link to $target failed; source left untouched"
+                    fi
+                fi
+                if [ -d "$target/workspace" ] && [ -z "$(ls -A "$target/workspace")" ] &&
+                   { [ -e "$stage/workspace" ] || [ -L "$stage/workspace" ]; }; then
+                    rmdir "$target/workspace" || {
+                        rm -rf "$stage"
+                        die "could not replace empty $target/workspace during migration"
+                    }
+                fi
+                for entry in "$stage"/* "$stage"/.[!.]* "$stage"/..?*; do
+                    if [ -e "$entry" ] || [ -L "$entry" ]; then
+                        mv -- "$entry" "$target/" || die "could not move migrated entry $entry into $target"
+                    fi
+                done
+                rmdir "$stage" || die "could not remove migration staging dir $stage"
                 rm -rf "$link" || die "could not remove $link after migration"
                 log "migrated contents of $link into $target"
             else
@@ -125,14 +158,18 @@ establish_symlink() {
 # cheap on later boots. find does not follow the .nanobot symlink.
 fix_ownership() {
     local dir
-    for dir in "$NANOBOT_HOME" "$HOME" "$PIXI_HOME" "$HOMEBREW_PREFIX" "$XDG_CACHE_HOME"; do
+    local -a roots=("$NANOBOT_HOME" "$HOME" "$PIXI_HOME" "$HOMEBREW_PREFIX" "$XDG_CACHE_HOME")
+    for dir in "$PIXI_CACHE_DIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HOMEBREW_CACHE" "$PYTHONPYCACHEPREFIX"; do
+        case "$dir" in
+            "$XDG_CACHE_HOME"|"$XDG_CACHE_HOME"/*) ;;
+            *) roots+=("$dir") ;;
+        esac
+    done
+    for dir in "${roots[@]}"; do
         [ -d "$dir" ] || continue
         find "$dir" \( ! -uid "$NANOBOT_UID" -o ! -gid "$NANOBOT_GID" \) \
             -exec chown -h "$NANOBOT_UID:$NANOBOT_GID" {} +
     done
-    if [ -L "$HOME/.nanobot" ]; then
-        chown -h "$NANOBOT_UID:$NANOBOT_GID" "$HOME/.nanobot"
-    fi
 }
 
 root_phase() {
@@ -143,7 +180,9 @@ root_phase() {
         "$HOME/.local/share/uv/tools" \
         "$PIXI_HOME" \
         "$HOMEBREW_PREFIX" \
-        "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip" "$XDG_CACHE_HOME/brew"
+        "$XDG_CACHE_HOME" \
+        "$PIXI_CACHE_DIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HOMEBREW_CACHE" \
+        "$PYTHONPYCACHEPREFIX"
 
     # The symlink policy runs before creating config/workspace so a pre-seeded
     # $HOME/.nanobot directory can still be migrated into an empty target.
@@ -206,7 +245,8 @@ pixi_package_present() {
     local manifest="$PIXI_HOME/manifests/pixi-global.toml"
 
     [ -d "$PIXI_HOME/envs/$name" ] && return 0
-    if [ -f "$manifest" ] && grep -qx "\[envs\.$name\]" "$manifest"; then
+    if [ -f "$manifest" ] &&
+       { grep -Fqx "[envs.$name]" "$manifest" || grep -Fqx "[envs.\"$name\"]" "$manifest"; }; then
         return 0
     fi
     return 1
@@ -214,13 +254,17 @@ pixi_package_present() {
 
 apply_extra_pixi_packages() {
     local raw="${EXTRA_PIXI_PACKAGES:-}"
+    local -a specs=()
     local spec name
 
     [ -n "$raw" ] || return 0
     raw="${raw//,/ }"
+    raw="${raw//$'\n'/ }"
 
-    # Word splitting is intentional: commas and whitespace both separate specs.
-    for spec in $raw; do
+    # Split on whitespace without pathname expansion (e.g. jq=1.7.*).
+    read -r -a specs <<< "$raw" || true
+    [ "${#specs[@]}" -gt 0 ] || return 0
+    for spec in "${specs[@]}"; do
         name="$(pixi_package_name "$spec")"
         if [ -z "$name" ]; then
             warn "cannot derive a package name from EXTRA_PIXI_PACKAGES entry '$spec'; skipping"
@@ -274,7 +318,7 @@ configure_npm() {
             prefix) value="$npm_config_prefix" ;;
             cache) value="$npm_config_cache" ;;
         esac
-        if [ -f "$npmrc" ] && grep -qx "$key=$value" "$npmrc"; then
+        if [ -f "$npmrc" ] && grep -Fqx "$key=$value" "$npmrc"; then
             continue
         fi
         if [ -f "$npmrc" ] && grep -q "^$key[[:space:]]*=" "$npmrc"; then
@@ -283,6 +327,8 @@ configure_npm() {
         fi
         if [ ! -f "$npmrc" ]; then
             printf '# Written by the nanobot entrypoint; safe to edit.\n' >"$npmrc"
+        elif [ -s "$npmrc" ] && [ "$(tail -c 1 "$npmrc" | wc -l)" -eq 0 ]; then
+            printf '\n' >>"$npmrc"
         fi
         printf '%s=%s\n' "$key" "$value" >>"$npmrc"
         log "configured npm $key=$value in $npmrc"
@@ -298,7 +344,10 @@ ensure_brew_cache_link() {
     local target="$HOMEBREW_CACHE"
 
     if [ -L "$link" ]; then
-        if [ "$(readlink -f "$link")" = "$(readlink -f "$target")" ]; then
+        local resolved target_resolved
+        resolved="$(readlink -f "$link" 2>/dev/null || true)"
+        target_resolved="$(readlink -f "$target" 2>/dev/null || true)"
+        if [ -n "$resolved" ] && [ "$resolved" = "$target_resolved" ]; then
             return 0
         fi
         warn "$link points elsewhere; brew will cache there instead of $target"
@@ -324,7 +373,10 @@ ensure_brew_wrapper() {
 
     [ -x "$target" ] || return 0
     if [ -L "$link" ]; then
-        if [ "$(readlink -f "$link")" = "$(readlink -f "$target")" ]; then
+        local resolved target_resolved
+        resolved="$(readlink -f "$link" 2>/dev/null || true)"
+        target_resolved="$(readlink -f "$target" 2>/dev/null || true)"
+        if [ -n "$resolved" ] && [ "$resolved" = "$target_resolved" ]; then
             return 0
         fi
         warn "$link points elsewhere; leaving it (brew may auto-update)"
@@ -373,13 +425,50 @@ unprivileged_phase() {
         "$HOME" "$HOME/.local/bin" "$HOME/.local/share/uv/tools" \
         "$PIXI_HOME" \
         "$HOMEBREW_PREFIX" \
-        "$XDG_CACHE_HOME" "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip" \
-        "$HOMEBREW_CACHE"; do
+        "$XDG_CACHE_HOME" "$PIXI_CACHE_DIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" \
+        "$PYTHONPYCACHEPREFIX" "$HOMEBREW_CACHE"; do
         ensure_writable_dir "$dir"
     done
 
     ensure_symlink
     export PATH="$PIXI_HOME/bin:$HOME/.local/bin:$HOMEBREW_PREFIX/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    if [ "$#" -eq 0 ]; then
+        set -- gateway
+    fi
+
+    case "$1" in
+        nanobot|*/nanobot) ;;
+        gateway|webui|agent|status|onboard|channels|plugins|provider|trigger|update|remote|completion)
+            set -- nanobot "$@" ;;
+        -*) set -- nanobot "$@" ;;
+    esac
+
+    local subcommand="" bootstrap_home="$NANOBOT_HOME"
+    if [ "$1" = "nanobot" ] || [[ "$1" == */nanobot ]]; then
+        local -a args=("$@")
+        local idx=1
+        while [ "$idx" -lt "${#args[@]}" ]; do
+            case "${args[$idx]}" in
+                --home)
+                    if [ $((idx + 1)) -lt "${#args[@]}" ]; then
+                        bootstrap_home="${args[$((idx + 1))]}"
+                    fi
+                    idx=$((idx + 2))
+                    ;;
+                --home=*)
+                    bootstrap_home="${args[$idx]#--home=}"
+                    idx=$((idx + 1))
+                    ;;
+                -*) idx=$((idx + 1)) ;;
+                *) subcommand="${args[$idx]}"; break ;;
+            esac
+        done
+
+        if [ "$subcommand" = "update" ]; then
+            reject_update
+        fi
+    fi
 
     configure_npm
     ensure_brew_cache_link
@@ -389,39 +478,11 @@ unprivileged_phase() {
     apply_extra_pixi_packages
     apply_channel_dependencies
 
-    if [ "$#" -eq 0 ]; then
-        set -- gateway
-    fi
-
-    case "$1" in
-        nanobot) ;;
-        gateway|webui|agent|status|onboard|channels|plugins|provider|trigger|update|remote|completion)
-            set -- nanobot "$@" ;;
-        -*) set -- nanobot "$@" ;;
-    esac
-
-    if [ "$1" = "nanobot" ]; then
-        local -a args=("$@")
-        local idx=1 subcommand=""
-        while [ "$idx" -lt "${#args[@]}" ]; do
-            case "${args[$idx]}" in
-                --home) idx=$((idx + 2)) ;;
-                --home=*) idx=$((idx + 1)) ;;
-                -*) idx=$((idx + 1)) ;;
-                *) subcommand="${args[$idx]}"; break ;;
-            esac
-        done
-
-        if [ "$subcommand" = "update" ]; then
-            reject_update
-        fi
-
-        if { [ "$subcommand" = "gateway" ] || [ "$subcommand" = "webui" ]; } &&
-           [ ! -f "$NANOBOT_HOME/config.json" ]; then
-            log "bootstrapping config at $NANOBOT_HOME/config.json"
-            /app/.venv/bin/python /usr/local/bin/nanobot-bootstrap.py ||
-                die "config bootstrap failed"
-        fi
+    if { [ "$subcommand" = "gateway" ] || [ "$subcommand" = "webui" ]; } &&
+       [ ! -f "$bootstrap_home/config.json" ]; then
+        log "bootstrapping config at $bootstrap_home/config.json"
+        NANOBOT_HOME="$bootstrap_home" /app/.venv/bin/python /usr/local/bin/nanobot-bootstrap.py ||
+            die "config bootstrap failed"
     fi
 
     exec "$@"

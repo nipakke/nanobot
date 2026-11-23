@@ -4,6 +4,13 @@ Date: 2026-11-23
 Status: implemented and verified (revision 5: 177 acceptance checks A1–A22).
 Revision: 5 (Homebrew on its own volume, npm global prefix, durable workspace rules)
 
+Post-revision note (size pass): the default image no longer bundles the native
+TUI binary (`BUNDLE_TUI=1` opts in), ships no `.pyc` (runtime cache prefix
+`/data/cache/pycache`), and pins Homebrew to 7.0.16 at commit
+`7ef183d10e7d6e5620d7124b744b1dfbf69fc108` instead of tracking `master`. The
+revision-5 sections below remain the historical as-built record; see `README.md`
+for current behavior.
+
 ## Intent
 
 Run `nanobot-ai==0.4.2` in a reproducible Docker container with:

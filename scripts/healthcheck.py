@@ -11,10 +11,11 @@ import urllib.request
 
 
 def main() -> int:
-    port = os.environ.get("NANOBOT_HEALTH_PORT", "18790")
+    port = os.environ.get("NANOBOT_HEALTH_PORT") or "18790"
     url = f"http://127.0.0.1:{port}/health"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(url, timeout=3) as response:
+        with opener.open(url, timeout=3) as response:
             if response.status == 200:
                 return 0
             print(f"healthcheck: unexpected status {response.status}", file=sys.stderr)

@@ -290,6 +290,7 @@ for pair in \
     UV_TOOL_DIR=/data/home/.local/share/uv/tools \
     UV_TOOL_BIN_DIR=/data/home/.local/bin \
     PIP_CACHE_DIR=/data/cache/pip \
+    PYTHONPYCACHEPREFIX=/data/cache/pycache \
     PIXI_NO_TELEMETRY=1; do
     var="${pair%%=*}"
     expected="${pair#*=}"
@@ -321,8 +322,8 @@ assert_contains 4 "unzip is installed" "$unzip_version" "UnZip"
 # ---------------------------------------------------------------------------
 printf '\n=== A5: filesystem ===\n'
 for dir in /data/config /data/home /data/pixi /data/cache \
-    /data/cache/pixi /data/cache/uv /data/cache/pip /data/config/workspace \
-    /data/home/.local/bin /data/home/.local/share/uv/tools; do
+    /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/pycache \
+    /data/config/workspace /data/home/.local/bin /data/home/.local/share/uv/tools; do
     owner="$(exec_root stat -c '%u:%g' "$dir" 2>/dev/null || echo missing)"
     assert_eq 5 "$dir exists and is owned 1000:1000 after startup" "1000:1000" "$owner"
 done
@@ -330,11 +331,23 @@ image_tree_owners="$(docker run --rm --entrypoint /bin/bash "$IMAGE" -c '
 for d in /data/home/.local/bin /data/home/.local/share/uv/tools; do
     stat -c "%n %u:%g" "$d"
 done
+printf "pyc=%s\n" "$(find /app/.venv -type f -name "*.pyc" -print -quit)"
+printf "tui=%s\n" "$(find /app/.venv/lib/python3.12/site-packages/nanobot/tui/bin -maxdepth 1 -type f -name "nanobot-tui-linux-*" -print -quit 2>/dev/null || true)"
 ' 2>&1)"
 assert_contains 5 "/data/home/.local/bin is 1000:1000 in the built image" \
     "$image_tree_owners" "/data/home/.local/bin 1000:1000"
 assert_contains 5 "/data/home/.local/share/uv/tools is 1000:1000 in the built image" \
     "$image_tree_owners" "/data/home/.local/share/uv/tools 1000:1000"
+if printf '%s\n' "$image_tree_owners" | grep -qx 'pyc='; then
+    pass 5 "built image has zero .pyc files in /app/.venv"
+else
+    fail 5 "built image has zero .pyc files in /app/.venv (got [$image_tree_owners])"
+fi
+if printf '%s\n' "$image_tree_owners" | grep -qx 'tui='; then
+    pass 5 "default built image omits bundled native TUI binary"
+else
+    fail 5 "default built image omits bundled native TUI binary (got [$image_tree_owners])"
+fi
 assert_eq 5 "/app/.venv is writable by nanobot" "0" \
     "$(exec_nanobot sh -c 'test -w /app/.venv' >/dev/null 2>&1; echo $?)"
 assert_eq 5 "bwrap is absent" "" "$(exec_nanobot sh -c 'command -v bwrap || true')"
@@ -402,7 +415,12 @@ w = c["channels"]["websocket"]
 print(w["host"])
 print(w["port"])
 print(c["tools"]["exec"]["pathPrepend"])
-print("PIXI_HOME" in c["tools"]["exec"]["allowedEnvKeys"])
+required = {
+    "PIXI_HOME", "PIXI_CACHE_DIR", "PIXI_NO_TELEMETRY", "XDG_CACHE_HOME",
+    "UV_CACHE_DIR", "UV_LINK_MODE", "PIP_CACHE_DIR", "PYTHONPYCACHEPREFIX",
+    "NANOBOT_HOME", "TZ",
+}
+print(required.issubset(set(c["tools"]["exec"]["allowedEnvKeys"])))
 ' 2>&1)"
 workspace_line="$(printf '%s\n' "$config_fields" | sed -n '1p')"
 gateway_host_line="$(printf '%s\n' "$config_fields" | sed -n '2p')"
@@ -417,7 +435,8 @@ assert_eq 10 "websocket host is 0.0.0.0" "0.0.0.0" "$ws_host_line"
 assert_eq 10 "websocket port is 8765" "8765" "$ws_port_line"
 assert_eq 10 "tools.exec.pathPrepend names the image tool dirs" \
     "/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin" "$exec_path_line"
-assert_eq 10 "tools.exec.allowedEnvKeys forwards PIXI_HOME" "True" "$exec_env_line"
+assert_eq 10 "tools.exec.allowedEnvKeys forwards image layout, cache, telemetry, and TZ vars" \
+    "True" "$exec_env_line"
 
 # ---------------------------------------------------------------------------
 # A11: pixi extras in separate environments
@@ -496,9 +515,9 @@ assert_contains 14 "rg still runs after recreate" "$(exec_nanobot sh -c 'rg --ve
 # A15: cache disposal
 # ---------------------------------------------------------------------------
 printf '\n=== A15: cache wipe ===\n'
-exec_root rm -rf /data/cache/pixi /data/cache/uv /data/cache/pip
+exec_root rm -rf /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/pycache
 restart_service
-for dir in /data/cache/pixi /data/cache/uv /data/cache/pip; do
+for dir in /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/pycache; do
     assert_eq 15 "$dir recreated and owned 1000:1000" "1000:1000" \
         "$(exec_nanobot_retry stat -c '%u:%g' "$dir" 2>/dev/null || echo missing)"
 done
@@ -844,8 +863,8 @@ assert_eq 22 "the wrapper resolves to the image's brew entry point" \
     "/usr/local/bin/nanobot-brew" "$(exec_nanobot readlink -f /data/home/.local/bin/brew)"
 assert_eq 22 "brew --prefix is /data/brew" "/data/brew" \
     "$(exec_nanobot sh -c 'brew --prefix')"
-assert_contains 22 "brew --version reports Homebrew" \
-    "$(exec_nanobot sh -c 'brew --version' 2>&1)" "Homebrew"
+assert_contains 22 "brew --version reports pinned Homebrew ${BREW_VERSION:-7.0.16}" \
+    "$(exec_nanobot sh -c 'brew --version' 2>&1)" "Homebrew ${BREW_VERSION:-7.0.16}"
 
 run_detached "brew install $BREW_FORMULA (app-runner env)" \
     "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'brew install $BREW_FORMULA'" 300
@@ -883,6 +902,8 @@ assert_eq 22 "the block is closed exactly once" "1" \
     "$(exec_nanobot sh -c 'grep -c nanobot-image-env:end /data/config/workspace/AGENTS.md')"
 assert_contains 22 "the block states the no-apt/no-sudo rule" \
     "$(exec_nanobot sh -c 'cat /data/config/workspace/AGENTS.md')" 'no `apt`/`apt-get`/`apk`'
+assert_contains 22 "the block reserves brew for WebUI Apps" \
+    "$(exec_nanobot sh -c 'cat /data/config/workspace/AGENTS.md')" 'Do not use `brew` for ad-hoc tool installs'
 
 force_recreate
 assert_eq 22 "brew still resolves after a recreate" "/data/home/.local/bin/brew" \
@@ -891,7 +912,7 @@ assert_eq 22 "the brew wrapper is still linked after the recreate" \
     "/usr/local/bin/nanobot-brew" \
     "$(exec_nanobot_retry readlink -f /data/home/.local/bin/brew)"
 assert_eq 22 "the brew bottle survives the recreate" "/data/brew/bin/$BREW_FORMULA" \
-    "$(exec_nanobot_retry sh -c "env -i HOME=/data/home LANG=C.UTF-8 TERM=dumb PATH=/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 /app/.venv/bin/python -c 'import shutil, sys; print(shutil.which(sys.argv[1]) or \"\")' $BREW_FORMULA" 2>&1)"
+    "$(exec_nanobot_retry sh -c "$ALLOWLIST_ENV /app/.venv/bin/python -c 'import shutil, sys; print(shutil.which(sys.argv[1]) or \"\")' $BREW_FORMULA" 2>&1)"
 assert_contains 22 "the brew bottle still runs after the recreate" \
     "$(exec_nanobot sh -c "$ALLOWLIST_ENV $BREW_FORMULA --version" 2>&1)" "$BREW_FORMULA"
 assert_eq 22 "npm prefix survives the recreate" "/data/home/.local" \
