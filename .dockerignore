@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data/
+docs/
+.agents/
+README.md
+compose.yaml
+compose.build.yaml
+scripts/smoke-test.sh

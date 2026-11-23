@@ -1,0 +1,9 @@
+services:
+  nanobot:
+    build:
+      context: .
+      args:
+        NANOBOT_VERSION: ${NANOBOT_VERSION:-0.4.2}
+        PIXI_VERSION: ${PIXI_VERSION:-v0.84.2}
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}

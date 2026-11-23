@@ -1,0 +1,41 @@
+name: nanobot
+
+services:
+  nanobot:
+    image: ${NANOBOT_IMAGE:-nanobot-pixi:0.4.2}
+    container_name: nanobot
+    # The image starts as root only for the entrypoint setup phase; the
+    # entrypoint drops to the nanobot user before running anything else.
+    user: "0:0"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
+      EXTRA_PIXI_PACKAGES: ${EXTRA_PIXI_PACKAGES:-}
+      TZ: ${TZ:-UTC}
+      NANOBOT_HEALTH_PORT: ${NANOBOT_HEALTH_PORT:-18790}
+    ports:
+      - "${NANOBOT_WEB_PORT:-8765}:8765"
+      # Host side is configurable; the container side stays 18790 unless
+      # gateway.port in config.json was changed.
+      - "127.0.0.1:${NANOBOT_HEALTH_HOST_PORT:-18790}:18790"
+    volumes:
+      - nanobot_config:/data/config
+      - nanobot_home:/data/home
+      - nanobot_pixi:/data/pixi
+      - nanobot_cache:/data/cache
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  nanobot_config:
+  nanobot_home:
+  nanobot_pixi:
+  nanobot_cache:
