@@ -119,3 +119,13 @@
 - Agent did: Put `pull_request`, `push`, and `workflow_dispatch` plus Docker Hub login/push steps in one `.github/workflows/image.yml` job gated by `decide-publish.sh`.
 - Trigger: Review of the GitHub Actions publishing workflow.
 - Evidence: user correction of 2026-11-23; split into `.github/workflows/test.yml` (`pull_request` only, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image paths + `workflow_dispatch`).
+
+## L-0015 — Optional additions live in the one runnable compose, commented
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: correction
+- What happened / correction: The user rejected a separate `compose.tailscale.yml` overlay because it does not run without the base file, then asked for one compose containing the original stack with the Tailscale sidecar as a commented, optional block — not an extra file.
+- Agent did: Built an overlay for `-f compose.yml -f compose.tailscale.yml`.
+- Trigger: Adding the Tailscale sidecar example.
+- Evidence: user correction of 2026-11-23; final commented block in `compose.yml`; `docs/tailscale.md`.

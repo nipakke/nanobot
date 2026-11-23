@@ -65,6 +65,9 @@ services:
   agent cannot install persistently. Set `NANOBOT_CHANNELS: "discord,telegram"`
   so the container installs and keeps them ready across recreates (see
   [available channel names](docs/configuration.md#channels-nanobot_channels)).
+- **Tailnet-only access (Tailscale):** the commented block in
+  [`compose.yml`](compose.yml) replaces published ports with a
+  `tailscale/tailscale` sidecar; see [Tailscale sidecar](docs/tailscale.md).
 
 ## Documentation
 
@@ -72,4 +75,5 @@ services:
 - [Usage, backups & upgrades](docs/usage.md) — common commands, `/data` layout, backups, resets, upgrading
 - [Container internals](docs/internals.md) — privilege model, bind mounts, agent rules, TUI & caching
 - [Local builds & development](docs/development.md) — building locally, smoke tests, CI & Renovate
+- [Tailscale sidecar](docs/tailscale.md) — tailnet-only access, no published host ports
 - Upstream: [HKUDS/nanobot](https://github.com/HKUDS/nanobot) · [nanobot-ai on PyPI](https://pypi.org/project/nanobot-ai/)

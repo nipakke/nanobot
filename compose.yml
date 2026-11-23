@@ -11,6 +11,8 @@ services:
       EXTRA_PIXI_PACKAGES: ${EXTRA_PIXI_PACKAGES:-}
       NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-}
       TZ: ${TZ:-UTC}
+    # comment out this block when enabling tailscale: published ports
+    # conflict with the shared network namespace
     ports:
       - "8765:8765"
       - "127.0.0.1:18790:18790"
@@ -38,3 +40,26 @@ services:
       - SETGID
     security_opt:
       - no-new-privileges:true
+    # network_mode: service:tailscale
+    # depends_on: [tailscale]
+
+  # tailscale:  # optional sidecar, tailnet-only access, no host ports
+  #   image: tailscale/tailscale:stable
+  #   container_name: nanobot-tailscale
+  #   hostname: nanobot
+  #   restart: unless-stopped
+  #   environment:
+  #     TS_AUTHKEY: ${TS_AUTHKEY:?}  # first join; not needed once state exists
+  #     TS_STATE_DIR: /var/lib/tailscale
+  #     TS_USERSPACE: "false"  # kernel networking, required for the shared namespace to work
+  #     TS_AUTH_ONCE: "true"  # don't re-login on every start (state persists)
+  #   volumes:
+  #     - tailscale-state:/var/lib/tailscale
+  #   devices:
+  #     - /dev/net/tun:/dev/net/tun
+  #   cap_add:
+  #     - NET_ADMIN
+  #     - NET_RAW
+
+# volumes:  # tailscale login state (optional)
+#   tailscale-state:
