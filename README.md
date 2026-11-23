@@ -124,6 +124,13 @@ volume in both modes** — see [Homebrew](#homebrew).
 `/app/.venv/bin`, so a tool installed with pixi, `npm -g`, or `brew` is usable
 immediately.
 
+The agent's exec tool builds a clean child environment instead of inheriting
+the container environment, so bootstrap gives a new config two exec defaults:
+`tools.exec.pathPrepend` names those four directories, and
+`tools.exec.allowedEnvKeys` includes `PIXI_HOME` so `pixi global list` sees the
+installations. An existing config needs the same two values (WebUI or
+`config.json`) before the agent can see pixi, `npm`, and `brew` tools.
+
 Image:
 
 | Path | Persistence |
@@ -285,6 +292,9 @@ docker compose exec -u nanobot brew install tree   # -> /data/brew/bin/tree
   build time. `$HOME/.local/bin/brew` is a symlink to a wrapper that restores
   the missing `HOMEBREW_*` values before running the real `bin/brew` — see
   [The brew wrapper on PATH](#the-brew-wrapper-on-path).
+- **Zip casks need `unzip`.** The image ships `/usr/bin/unzip`; without it
+  Homebrew's ZIP strategy looks up `Formula["unzip"]` inside its sandbox, which
+  fails on a cold API cache (`brew install --cask 1password-cli` aborts).
 - **Bottle cache.** With the image env, `HOMEBREW_CACHE=/data/cache/brew`. Under
   the WebUI's stripped env brew would fall back to `$HOME/.cache/Homebrew`, so
   the entrypoint symlinks that path to `/data/cache/brew`: downloads stay in the
@@ -577,6 +587,15 @@ is unaffected.
   `nanobot status` reports `/data/config/config.json`; the
   `/data/home/.nanobot -> /data/config` symlink keeps filesystem-based
   resolution consistent.
+- **Why `~/.nanobot` stays a symlink.** nanobot 0.4.2 does not route every path
+  through `set_home_path()`: the update/data-access locks
+  (`nanobot/data_access.py`, `nanobot/installation_lock.py`), the bun tool
+  cache (`nanobot/bun.py`), QQ media (`nanobot/channels/qq/runtime.py`) and the
+  gateway default config path (`nanobot/gateway/runtime.py:_default_config_path`)
+  are built from `Path.home()`. The symlink is what keeps that state inside
+  `/data/config`; without it a container creates a real
+  `/data/home/.nanobot/updates/data-locks` and splits instance state across the
+  home and config trees. Removing it would require patching those call sites.
 - `NANOBOT_CHANNELS` is also image-level and entrypoint-only. nanobot's
   settings use the `NANOBOT_` prefix, so the variable would otherwise be parsed
   as the whole channels mapping; the entrypoint unsets it and the same

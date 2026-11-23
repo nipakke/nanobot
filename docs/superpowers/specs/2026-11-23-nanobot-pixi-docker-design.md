@@ -81,6 +81,7 @@ Run `nanobot-ai==0.4.2` in a reproducible Docker container with:
 6. **CLI wrapper injecting `--home`.** Rejected: the symlink covers filesystem
    resolution; an extra shim is limited to the venv's `sitecustomize` so
    ad-hoc commands report the canonical path without changing the CLI surface.
+7. **Remove the `~/.nanobot` symlink and rely on `sitecustomize.py`.** Rejected: 0.4.2 builds update/data-access locks, the bun tool cache, QQ media and the gateway default config path from `Path.home()`, ignoring `set_home_path()`. Without the symlink they land in `/data/home/.nanobot` (verified: `updates/data-locks` appeared in a fresh container), splitting instance state across the home and config trees.
 
 ## Verified 0.4.2 behavior
 

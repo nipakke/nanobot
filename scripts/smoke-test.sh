@@ -309,10 +309,12 @@ nanobot_version="$(exec_nanobot sh -c 'nanobot --version' 2>&1)"
 pixi_version="$(exec_nanobot sh -c 'pixi --version' 2>&1)"
 uv_version="$(exec_nanobot sh -c 'uv --version' 2>&1)"
 tini_version="$(exec_nanobot sh -c 'tini --version' 2>&1)"
+unzip_version="$(exec_nanobot unzip -v 2>&1)"
 assert_contains 4 "nanobot --version" "$nanobot_version" "0.4.2"
 assert_contains 4 "pixi --version" "$pixi_version" "0.84.2"
 assert_contains 4 "uv --version" "$uv_version" "uv "
 assert_contains 4 "tini --version" "$tini_version" "tini version"
+assert_contains 4 "unzip is installed" "$unzip_version" "UnZip"
 
 # ---------------------------------------------------------------------------
 # A5: persistent trees, venv, no bwrap
@@ -399,16 +401,23 @@ print(c["gateway"]["host"])
 w = c["channels"]["websocket"]
 print(w["host"])
 print(w["port"])
+print(c["tools"]["exec"]["pathPrepend"])
+print("PIXI_HOME" in c["tools"]["exec"]["allowedEnvKeys"])
 ' 2>&1)"
 workspace_line="$(printf '%s\n' "$config_fields" | sed -n '1p')"
 gateway_host_line="$(printf '%s\n' "$config_fields" | sed -n '2p')"
 ws_host_line="$(printf '%s\n' "$config_fields" | sed -n '3p')"
 ws_port_line="$(printf '%s\n' "$config_fields" | sed -n '4p')"
+exec_path_line="$(printf '%s\n' "$config_fields" | sed -n '5p')"
+exec_env_line="$(printf '%s\n' "$config_fields" | sed -n '6p')"
 assert_eq 10 "agents.defaults.workspace is /data/config/workspace" \
     "/data/config/workspace" "$workspace_line"
 assert_eq 10 "gateway.host is 0.0.0.0" "0.0.0.0" "$gateway_host_line"
 assert_eq 10 "websocket host is 0.0.0.0" "0.0.0.0" "$ws_host_line"
 assert_eq 10 "websocket port is 8765" "8765" "$ws_port_line"
+assert_eq 10 "tools.exec.pathPrepend names the image tool dirs" \
+    "/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin" "$exec_path_line"
+assert_eq 10 "tools.exec.allowedEnvKeys forwards PIXI_HOME" "True" "$exec_env_line"
 
 # ---------------------------------------------------------------------------
 # A11: pixi extras in separate environments

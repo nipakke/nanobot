@@ -73,6 +73,11 @@ LABEL org.opencontainers.image.title="nanobot + pixi" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.base.name="docker.io/library/python:3.12-slim-bookworm"
 
+# unzip is required for Homebrew casks whose artifacts are zip archives: without
+# a system unzip, the ZIP strategy calls Formula["unzip"] inside Homebrew's
+# Landlock sandbox, which writes the formula API cache and fails with EACCES on
+# a cold cache. With /usr/bin/unzip present, which("unzip") succeeds and that
+# sandboxed lookup is skipped.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -84,6 +89,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libmagic1 \
         tini \
         tzdata \
+        unzip \
         xz-utils && \
     rm -rf /var/lib/apt/lists/*
 

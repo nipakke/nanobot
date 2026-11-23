@@ -69,3 +69,43 @@
 - Agent did: Verified brew/npm installs under the full container environment, which masked the stripped-env failure.
 - Trigger: WebUI app install path checks.
 - Evidence: HANDOFF.md "Hard-won constraints" second bullet; `scripts/brew-wrapper.sh:4-13`; `entrypoint.sh:316-323`.
+
+## L-0009 — `AGENTS.md` stays a small pointer; project knowledge lives under `.agents/`
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: correction
+- What happened / correction: The user rejected the expanded rulebook-style `AGENTS.md`. It must stay small: one sentence on what the project is, pointer to `.agents/` (`references/` for durable facts, `skills/` for procedures, `lessons/` for the committed lesson log), pointers to `README.md` and the design spec, and one line saying not to grow the file. Durable detail goes under `.agents/`.
+- Agent did: Expanded `AGENTS.md` into the full image, persistence, runtime-install and command rules.
+- Trigger: Review of `AGENTS.md` after it was expanded.
+- Evidence: user correction of 2026-11-23; new `AGENTS.md`; `.agents/references/nanobot-image.md`.
+
+## L-0010 — Homebrew casks need unpack tools on PATH, not a sandboxed formula lookup
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: friction
+- What happened / correction: A WebUI `brew install --cask 1password-cli` failed with `EACCES ... /data/cache/brew/api/formula_names.txt` from `api.rb:288` during zip extraction. The image had no `unzip`, so Homebrew's ZIP strategy called `Formula["unzip"]` inside its Landlock sandbox; that cold-cache API write is denied. Baking Debian `unzip` into the image made `which("unzip")` short-circuit the lookup, and the cask installed.
+- Agent did: A22 only exercised a bottle formula, so no check covered cask/zip extraction or the unpack tools casks assume.
+- Trigger: 1Password cask install from the WebUI Apps screen.
+- Evidence: user traceback (`unpack_strategy/zip.rb:29` -> `api.rb:288`); `command -v unzip` empty; after adding `unzip`, `brew install --cask 1password-cli` reports success; `Dockerfile:76-92`; README Homebrew note; `.agents/references/nanobot-image.md`.
+
+## L-0011 — The agent shell does not inherit PATH or PIXI_HOME
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: friction
+- What happened / correction: The agent reported `npx`/`node` unavailable even though the container PATH had `/data/pixi/bin`. nanobot's exec tool builds a clean child env and omits `PATH` on Unix, so bash fell back to `/usr/local/bin:/usr/bin:/bin:...`; `pixi global list` was also empty because `PIXI_HOME` was dropped. Setting `tools.exec.pathPrepend` to the image tool dirs and forwarding `PIXI_HOME` made node/npx and the pixi global env visible. Symlinking into `$HOME/.local/bin` would not have worked: that dir is absent from the same default PATH.
+- Agent did: Assumed the entrypoint PATH applied to agent tool calls and left `tools.exec.pathPrepend`/`allowedEnvKeys` empty at bootstrap.
+- Trigger: user reported the container agent could not run `npx`/`node`.
+- Evidence: `/app/.venv/lib/python3.12/site-packages/nanobot/agent/tools/shell.py` `_build_env`; `env -i ... bash -c 'command -v node'` empty; config `tools.exec.pathPrepend` empty; after the config change `npx --version` -> 11.20.0 and `pixi global list` -> nodejs 26.13.1.
+
+## L-0013 — Docker forwards 500 blocks new published ports; verify without `-p`
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: friction
+- What happened / correction: The acceptance suite stopped at A6 with `/forwards/expose returned unexpected status: 500` for every new published port, on both `127.0.0.1` and `0.0.0.0`, while the live container's existing ports still answered. A plain `docker run -p` reproduced it, so the failure is the host's Docker Desktop/WSL2 forwarding service, not the image or the suite. Recovering it needs a Docker Desktop restart, which is host-level and stops the live stack.
+- Agent did: Re-ran with free port overrides, confirmed the error was port-independent, stopped at the layer boundary, and verified the changed behavior with `docker run` and no published ports plus the container-side healthcheck.
+- Trigger: `bash scripts/smoke-test.sh` after the symlink-removal change.
+- Evidence: `/tmp/opencode/smoke-run.log` A6 failure; `docker run -p 18894:80` same 500; live `nanobot` 8765 and 28790 still answer 200.
