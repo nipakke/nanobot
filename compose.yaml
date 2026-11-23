@@ -12,6 +12,7 @@ services:
     environment:
       NANOBOT_WEB_TOKEN: ${NANOBOT_WEB_TOKEN:-}
       EXTRA_PIXI_PACKAGES: ${EXTRA_PIXI_PACKAGES:-}
+      NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-}
       TZ: ${TZ:-UTC}
       NANOBOT_HEALTH_PORT: ${NANOBOT_HEALTH_PORT:-18790}
     ports:
@@ -24,6 +25,9 @@ services:
       - nanobot_home:/data/home
       - nanobot_pixi:/data/pixi
       - nanobot_cache:/data/cache
+      # Homebrew's prefix. Deliberately its own named volume in both modes:
+      # see compose.bind.yaml for why it is not under ./data.
+      - nanobot_brew:/data/brew
     cap_drop:
       - ALL
     cap_add:
@@ -39,3 +43,4 @@ volumes:
   nanobot_home:
   nanobot_pixi:
   nanobot_cache:
+  nanobot_brew:

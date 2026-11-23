@@ -10,3 +10,6 @@ README.md
 compose.yaml
 compose.build.yaml
 scripts/smoke-test.sh
+scripts/smoke-compose.yaml
+scripts/bind-mode-check.sh
+*.log

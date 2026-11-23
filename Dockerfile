@@ -53,6 +53,13 @@ RUN set -eux; \
 
 # ---------------------------------------------------------------------------
 # Stage 3: runtime image.
+#
+# Homebrew is baked into /data/brew (persisted on its own named volume) because
+# nanobot's WebUI app runner executes `brew install ...` with a minimal env
+# (HOME, LANG, TERM, PATH, PYTHONUNBUFFERED) and resolves `brew` from PATH:
+# image-level HOMEBREW_* variables never reach that subprocess. brew derives its
+# prefix from the location of bin/brew, so the prefix must be a real install
+# tree at a stable path, not an env-only convention.
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 
@@ -76,7 +83,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         openssh-client \
         libmagic1 \
         tini \
-        tzdata && \
+        tzdata \
+        xz-utils && \
     rm -rf /var/lib/apt/lists/*
 
 # Fixed non-root identity. UID/GID are build args so image tags can be
@@ -97,12 +105,22 @@ ENV HOME=/data/home \
     UV_TOOL_DIR=/data/home/.local/share/uv/tools \
     UV_TOOL_BIN_DIR=/data/home/.local/bin \
     PIP_CACHE_DIR=/data/cache/pip \
-    PATH=/data/pixi/bin:/data/home/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOMEBREW_PREFIX=/data/brew \
+    HOMEBREW_CELLAR=/data/brew/Cellar \
+    HOMEBREW_REPOSITORY=/data/brew/Homebrew \
+    HOMEBREW_CACHE=/data/cache/brew \
+    HOMEBREW_NO_AUTO_UPDATE=1 \
+    HOMEBREW_NO_ANALYTICS=1 \
+    HOMEBREW_NO_ENV_HINTS=1 \
+    npm_config_prefix=/data/home/.local \
+    npm_config_cache=/data/home/.npm \
+    PATH=/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    NANOBOT_VERSION=${NANOBOT_VERSION}
 
 # The venv stays in the image layer: never mount a volume over /app/.venv.
 # --chown avoids a second full-size layer just to fix ownership.
@@ -117,8 +135,33 @@ RUN mkdir -p /data/config/workspace \
         /data/home/.local/bin \
         /data/home/.local/share/uv/tools \
         /data/pixi \
-        /data/cache/pixi /data/cache/uv /data/cache/pip && \
+        /data/brew \
+        /data/cache/pixi /data/cache/uv /data/cache/pip /data/cache/brew && \
     chown -R nanobot:nanobot /data
+
+# Bake Homebrew into /data/brew. brew refuses to run as root, so the install
+# step runs as nanobot and the runtime user is restored afterwards.
+#
+# A depth-1 clone plus the prefix/bin/brew symlink is the official custom-prefix
+# layout: bin/brew derives HOMEBREW_PREFIX from its own resolved path, which is
+# what makes `brew` work when the WebUI's minimal subprocess env has no
+# HOMEBREW_* variables at all. `brew --version` is answered by bin/brew without
+# Ruby; `brew config` is the first command that needs it and vendors Homebrew's
+# portable Ruby (brew has no system ruby on this image). Running it here bakes
+# that in, so a fresh /data/brew volume seeded from the image needs no network
+# to run brew at all. The scratch HOMEBREW_CACHE keeps downloaded tarballs and
+# the API index out of the image: /data/cache is a volume at runtime, so a
+# build-time copy there would be dead weight. No formulae are installed at
+# build time: bottles belong in the volume.
+USER nanobot
+RUN git clone --depth 1 --single-branch https://github.com/Homebrew/brew /data/brew/Homebrew && \
+    mkdir -p /data/brew/bin && \
+    ln -s ../Homebrew/bin/brew /data/brew/bin/brew && \
+    HOMEBREW_CACHE=/tmp/brew-cache brew --version && \
+    HOMEBREW_CACHE=/tmp/brew-cache brew config > /tmp/brew-config.txt && \
+    grep -q '^Homebrew Ruby:' /tmp/brew-config.txt && \
+    rm -rf /tmp/brew-config.txt /tmp/brew-cache
+USER root
 
 # Container-side shim: make NANOBOT_HOME the default nanobot instance root.
 # Without it, default CLI calls print the symlink path (/data/home/.nanobot)
@@ -130,8 +173,16 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && \
     chmod 0755 /usr/local/bin/entrypoint.sh
 COPY scripts/nanobot-bootstrap.py /usr/local/bin/nanobot-bootstrap.py
+COPY scripts/nanobot-channels.py /usr/local/bin/nanobot-channels.py
 COPY scripts/healthcheck.py /usr/local/bin/healthcheck.py
-RUN chmod 0755 /usr/local/bin/nanobot-bootstrap.py /usr/local/bin/healthcheck.py
+COPY scripts/workspace-agents-env.py /usr/local/bin/workspace-agents-env.py
+COPY scripts/brew-wrapper.sh /usr/local/bin/nanobot-brew
+RUN sed -i 's/\r$//' /usr/local/bin/nanobot-brew && \
+    chmod 0755 /usr/local/bin/nanobot-bootstrap.py \
+        /usr/local/bin/nanobot-channels.py \
+        /usr/local/bin/healthcheck.py \
+        /usr/local/bin/workspace-agents-env.py \
+        /usr/local/bin/nanobot-brew
 
 COPY etc/nanobot-env.md /etc/nanobot-env.md
 RUN chmod 0444 /etc/nanobot-env.md

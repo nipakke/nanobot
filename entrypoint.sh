@@ -25,6 +25,15 @@ apply_defaults() {
     export UV_TOOL_DIR="${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}"
     export UV_TOOL_BIN_DIR="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
     export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$XDG_CACHE_HOME/pip}"
+    export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/data/brew}"
+    export HOMEBREW_CELLAR="${HOMEBREW_CELLAR:-$HOMEBREW_PREFIX/Cellar}"
+    export HOMEBREW_REPOSITORY="${HOMEBREW_REPOSITORY:-$HOMEBREW_PREFIX/Homebrew}"
+    export HOMEBREW_CACHE="${HOMEBREW_CACHE:-$XDG_CACHE_HOME/brew}"
+    export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
+    export HOMEBREW_NO_ANALYTICS="${HOMEBREW_NO_ANALYTICS:-1}"
+    export HOMEBREW_NO_ENV_HINTS="${HOMEBREW_NO_ENV_HINTS:-1}"
+    export npm_config_prefix="${npm_config_prefix:-$HOME/.local}"
+    export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
     export PIXI_NO_TELEMETRY="${PIXI_NO_TELEMETRY:-1}"
     export NANOBOT_UID="${NANOBOT_UID:-1000}"
     export NANOBOT_GID="${NANOBOT_GID:-1000}"
@@ -116,7 +125,7 @@ establish_symlink() {
 # cheap on later boots. find does not follow the .nanobot symlink.
 fix_ownership() {
     local dir
-    for dir in "$NANOBOT_HOME" "$HOME" "$PIXI_HOME" "$XDG_CACHE_HOME"; do
+    for dir in "$NANOBOT_HOME" "$HOME" "$PIXI_HOME" "$HOMEBREW_PREFIX" "$XDG_CACHE_HOME"; do
         [ -d "$dir" ] || continue
         find "$dir" \( ! -uid "$NANOBOT_UID" -o ! -gid "$NANOBOT_GID" \) \
             -exec chown -h "$NANOBOT_UID:$NANOBOT_GID" {} +
@@ -133,7 +142,8 @@ root_phase() {
         "$HOME/.local/bin" \
         "$HOME/.local/share/uv/tools" \
         "$PIXI_HOME" \
-        "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip"
+        "$HOMEBREW_PREFIX" \
+        "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip" "$XDG_CACHE_HOME/brew"
 
     # The symlink policy runs before creating config/workspace so a pre-seeded
     # $HOME/.nanobot directory can still be migrated into an empty target.
@@ -227,6 +237,122 @@ apply_extra_pixi_packages() {
     done
 }
 
+# Install the Python dependencies declared by the channels named in
+# NANOBOT_CHANNELS. The helper resolves each name through nanobot's own channel
+# registry and installs the declared requirements into /app/.venv with uv,
+# using the persistent /data/cache/uv cache. It is a no-op when every
+# requirement is already present, and it never aborts startup: any failure is a
+# warning and the gateway still runs.
+apply_channel_dependencies() {
+    local channels="${NANOBOT_CHANNELS:-}"
+
+    if [ -n "$channels" ]; then
+        /app/.venv/bin/python /usr/local/bin/nanobot-channels.py "$channels" ||
+            warn "channel dependency helper exited nonzero; the gateway will still start"
+    fi
+
+    # NANOBOT_CHANNELS is an entrypoint-only knob. nanobot's settings read the
+    # NANOBOT_ prefix, so this name would be parsed as the whole channels
+    # mapping, and any value (even empty) fails validation. Drop it before the
+    # gateway or a bootstrap run inherits it. Ad-hoc `docker exec` processes get
+    # the container-level env instead, so the venv sitecustomize shim also
+    # removes it at interpreter startup.
+    unset NANOBOT_CHANNELS
+}
+
+# npm resolves its global prefix from `npm_config_prefix` in the environment, or
+# from the user config at $HOME/.npmrc. The WebUI app runner starts npm with a
+# minimal env (HOME, LANG, TERM, PATH, PYTHONUNBUFFERED), so the image's
+# npm_config_prefix never arrives there and npm would fall back to its builtin
+# prefix inside the node environment, which is not on PATH. HOME is persistent
+# and is passed through, so record both settings in ~/.npmrc. Keys that are
+# already set are never rewritten: an operator's own values win.
+configure_npm() {
+    local npmrc="$HOME/.npmrc" key value
+    for key in prefix cache; do
+        case "$key" in
+            prefix) value="$npm_config_prefix" ;;
+            cache) value="$npm_config_cache" ;;
+        esac
+        if [ -f "$npmrc" ] && grep -qx "$key=$value" "$npmrc"; then
+            continue
+        fi
+        if [ -f "$npmrc" ] && grep -q "^$key[[:space:]]*=" "$npmrc"; then
+            warn "$npmrc already sets $key; keeping that value instead of $value"
+            continue
+        fi
+        if [ ! -f "$npmrc" ]; then
+            printf '# Written by the nanobot entrypoint; safe to edit.\n' >"$npmrc"
+        fi
+        printf '%s=%s\n' "$key" "$value" >>"$npmrc"
+        log "configured npm $key=$value in $npmrc"
+    done
+}
+
+# brew falls back to $HOME/.cache/Homebrew when HOMEBREW_CACHE is absent from
+# its environment (again the WebUI path). Point that at the disposable cache
+# tree so bottle downloads do not accumulate in the home volume. Existing data
+# is never moved or replaced.
+ensure_brew_cache_link() {
+    local link="$HOME/.cache/Homebrew"
+    local target="$HOMEBREW_CACHE"
+
+    if [ -L "$link" ]; then
+        if [ "$(readlink -f "$link")" = "$(readlink -f "$target")" ]; then
+            return 0
+        fi
+        warn "$link points elsewhere; brew will cache there instead of $target"
+        return 0
+    fi
+    if [ -e "$link" ]; then
+        warn "$link exists and is not a symlink; leaving it in place"
+        return 0
+    fi
+    mkdir -p "$HOME/.cache" && ln -s "$target" "$link" ||
+        { warn "could not link $link -> $target"; return 0; }
+    log "linked $link -> $target"
+}
+
+# $HOME/.local/bin/brew -> /usr/local/bin/nanobot-brew. That wrapper restores
+# the image's HOMEBREW_* defaults (notably HOMEBREW_NO_AUTO_UPDATE) for the
+# WebUI app runner, whose env carries none of them; without it every WebUI
+# `brew install` starts with a git auto-update inside /data/brew, which has
+# killed the Docker engine on this host. It sits before /data/brew/bin on PATH.
+ensure_brew_wrapper() {
+    local link="$HOME/.local/bin/brew"
+    local target="/usr/local/bin/nanobot-brew"
+
+    [ -x "$target" ] || return 0
+    if [ -L "$link" ]; then
+        if [ "$(readlink -f "$link")" = "$(readlink -f "$target")" ]; then
+            return 0
+        fi
+        warn "$link points elsewhere; leaving it (brew may auto-update)"
+        return 0
+    fi
+    if [ -e "$link" ]; then
+        warn "$link exists and is not a symlink; leaving it (brew may auto-update)"
+        return 0
+    fi
+    ln -s "$target" "$link" || { warn "could not link $link -> $target"; return 0; }
+    log "linked $link -> $target"
+}
+
+# The agent's context only includes <workspace>/AGENTS.md (plus SOUL.md and
+# USER.md); /etc/nanobot-env.md is never read automatically. nanobot creates
+# those workspace files from its bundled templates inside the gateway, which
+# starts after this phase, so the helper seeds them first via nanobot's own
+# idempotent sync (only missing files are written) and then keeps a marked rules
+# block in AGENTS.md. It never duplicates the block and never rewrites text
+# outside it.
+ensure_workspace_agent_rules() {
+    local helper="/usr/local/bin/workspace-agents-env.py"
+
+    [ -x "$helper" ] || return 0
+    /app/.venv/bin/python -B "$helper" --seed-templates "$NANOBOT_HOME/workspace" ||
+        warn "workspace AGENTS.md helper failed; the gateway still starts"
+}
+
 reject_update() {
     cat >&2 <<'EOF'
 [entrypoint] ERROR: in-container `nanobot update` is not supported.
@@ -246,14 +372,22 @@ unprivileged_phase() {
         "$NANOBOT_HOME/workspace" \
         "$HOME" "$HOME/.local/bin" "$HOME/.local/share/uv/tools" \
         "$PIXI_HOME" \
-        "$XDG_CACHE_HOME" "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip"; do
+        "$HOMEBREW_PREFIX" \
+        "$XDG_CACHE_HOME" "$XDG_CACHE_HOME/pixi" "$XDG_CACHE_HOME/uv" "$XDG_CACHE_HOME/pip" \
+        "$HOMEBREW_CACHE"; do
         ensure_writable_dir "$dir"
     done
 
     ensure_symlink
-    export PATH="$PIXI_HOME/bin:$HOME/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH="$PIXI_HOME/bin:$HOME/.local/bin:$HOMEBREW_PREFIX/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    configure_npm
+    ensure_brew_cache_link
+    ensure_brew_wrapper
+    ensure_workspace_agent_rules
 
     apply_extra_pixi_packages
+    apply_channel_dependencies
 
     if [ "$#" -eq 0 ]; then
         set -- gateway

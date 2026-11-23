@@ -1,0 +1,10 @@
+# Local environment and secrets (the template stays tracked).
+.env
+.env.*
+!.env.example
+
+# Build and test logs.
+*.log
+
+# Optional bind-mount target used when testing host mounts.
+data/

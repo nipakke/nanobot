@@ -1,20 +1,29 @@
 #!/usr/bin/env bash
-# Acceptance suite for the nanobot + pixi image (A1-A20).
+# Acceptance suite for the nanobot + pixi image (A1-A22).
 #
-# Builds nanobot-pixi:smoke, runs it through Compose with four fresh, initially
+# Builds nanobot-pixi:smoke, runs it through Compose with five fresh, initially
 # root-owned named volumes, and exercises entrypoint, persistence, pixi, health,
-# bootstrap, symlink safety, and upgrade rejection. Uses a unique Compose
-# project name and removes only the resources it creates.
+# bootstrap, symlink safety, upgrade rejection, channel dependency installs,
+# Homebrew on its own volume, and the npm global prefix.
+# Uses a unique Compose project name and removes only the resources it creates.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
 readonly IMAGE="nanobot-pixi:smoke"
 readonly PROJECT="nanobot-smoke-$$"
+# compose.yaml pins `container_name: nanobot` for operators. The suite passes
+# scripts/smoke-compose.yaml last to override it, so an operator's `nanobot`
+# container is never taken over (or removed by `down --remove-orphans`).
+readonly CONTAINER_NAME="${PROJECT}-nanobot"
 readonly BOOTSTRAP_NAME="${PROJECT}-bootstrap"
 readonly BUILD_LOG="${TMPDIR:-/tmp}/nanobot-smoke-build.log"
 
-COMPOSE=(docker compose -p "$PROJECT" -f compose.yaml -f compose.build.yaml)
+export NANOBOT_SMOKE_CONTAINER="$CONTAINER_NAME"
+COMPOSE=(docker compose -p "$PROJECT" \
+    -f compose.yaml \
+    -f compose.build.yaml \
+    -f scripts/smoke-compose.yaml)
 CID=""
 PASSED=0
 FAILED=0
@@ -24,6 +33,7 @@ VOLUMES=(
     "${PROJECT}_nanobot_home"
     "${PROJECT}_nanobot_pixi"
     "${PROJECT}_nanobot_cache"
+    "${PROJECT}_nanobot_brew"
 )
 EXTRA_VOLUMES=(
     "${PROJECT}_sym_config"
@@ -73,6 +83,12 @@ cleanup() {
     set +e
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
     docker rm -f "$BOOTSTRAP_NAME" >/dev/null 2>&1
+    # Anything else this project created: `compose run` one-offs get random
+    # names unless the suite passes --name, so sweep the project label too.
+    local id
+    while IFS= read -r id; do
+        [ -n "$id" ] && docker rm -f "$id" >/dev/null 2>&1
+    done < <(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}")
     local name
     while IFS= read -r name; do
         [ -n "$name" ] && docker rm -f "$name" >/dev/null 2>&1
@@ -81,6 +97,7 @@ cleanup() {
     for volume in "${VOLUMES[@]}" "${EXTRA_VOLUMES[@]}"; do
         docker volume rm -f "$volume" >/dev/null 2>&1
     done
+    docker network rm "${PROJECT}_default" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -123,6 +140,35 @@ exec_nanobot_retry() {
     return "$rc"
 }
 
+# Run a long install detached and poll for its exit code.
+#
+# Homebrew and npm installs produce no output until they finish, and this host
+# has already returned HTTP 500 from a long `docker exec` stream while the
+# container kept running. Detaching keeps the work alive, keeps the suite's
+# output moving (a dot per poll), and makes a broken CLI stream harmless.
+# Sets DETACHED_RC (empty on timeout) and DETACHED_SECONDS.
+DETACHED_RC=""
+DETACHED_SECONDS=0
+run_detached() {
+    local label="$1" command="$2" limit="$3" waited=0 rc=""
+
+    exec_nanobot rm -f /tmp/smoke-cmd.rc /tmp/smoke-cmd.log >/dev/null 2>&1
+    docker exec -d -u nanobot "$CID" sh -c \
+        "$command >/tmp/smoke-cmd.log 2>&1; echo \$? >/tmp/smoke-cmd.rc" >/dev/null 2>&1
+    printf '%s: ' "$label"
+    while [ "$waited" -lt "$limit" ]; do
+        rc="$(exec_nanobot sh -c 'cat /tmp/smoke-cmd.rc 2>/dev/null' 2>/dev/null || true)"
+        [ -n "$rc" ] && break
+        printf '.'
+        sleep 5
+        waited=$((waited + 5))
+    done
+    printf ' %ss rc=%s\n' "$waited" "${rc:-timeout}"
+    exec_nanobot tail -2 /tmp/smoke-cmd.log 2>/dev/null || true
+    DETACHED_RC="$rc"
+    DETACHED_SECONDS="$waited"
+}
+
 start_service() {
     "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 300
     CID="$("${COMPOSE[@]}" ps -q nanobot)"
@@ -145,11 +191,7 @@ docker_daemon_ok() { docker info >/dev/null 2>&1; }
 docker_daemon_ok || fatal "Docker daemon is not reachable"
 command -v docker >/dev/null || fatal "docker CLI is missing"
 
-if docker ps -a --format '{{.Names}}' | grep -qx 'nanobot'; then
-    fatal "an unrelated container named 'nanobot' already exists; refusing to touch it"
-fi
-
-printf 'project=%s image=%s\n' "$PROJECT" "$IMAGE"
+printf 'project=%s container=%s image=%s\n' "$PROJECT" "$CONTAINER_NAME" "$IMAGE"
 
 # ---------------------------------------------------------------------------
 # A1: build
@@ -179,12 +221,14 @@ for volume in "${VOLUMES[@]}"; do
 done
 
 export NANOBOT_IMAGE="$IMAGE"
-export EXTRA_PIXI_PACKAGES="jq,ripgrep"
+export EXTRA_PIXI_PACKAGES="jq,ripgrep,nodejs"
 export TZ="UTC"
 export NANOBOT_HEALTH_HOST_PORT="18791"
 export NANOBOT_HEALTH_PORT="18790"
 export NANOBOT_WEB_TOKEN="smoke-web-token"
-export NANOBOT_WEB_PORT="8765"
+# Host ports are distinct from the operator defaults (8765, 18790) so the suite
+# can run next to a live stack; the container-side ports stay 8765 and 18790.
+export NANOBOT_WEB_PORT="18766"
 
 if "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 300; then
     pass 6 "startup fixes ownership on fresh root-owned volumes and becomes healthy"
@@ -531,7 +575,6 @@ docker run --rm --user 0:0 --entrypoint /bin/bash \
     "$IMAGE" -c 'mkdir -p /data/home/.nanobot && echo legacy-data > /data/home/.nanobot/legacy.txt' \
     >/dev/null || fatal "could not seed legacy home"
 
-set +e
 docker run --rm --user 0:0 \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
     --security-opt no-new-privileges:true \
@@ -541,7 +584,6 @@ docker run --rm --user 0:0 \
     -v "${PROJECT}_sym_cache:/data/cache" \
     "$IMAGE" /bin/true >/dev/null 2>&1
 migration_rc=$?
-set -e
 assert_eq 19 "migration startup exits 0" "0" "$migration_rc"
 
 migration_state="$(docker run --rm --user 0:0 --entrypoint /bin/bash \
@@ -570,7 +612,6 @@ docker volume create "${PROJECT}_sym_home2" >/dev/null
 docker run --rm --user 0:0 --entrypoint /bin/bash \
     -v "${PROJECT}_sym_home2:/data/home" \
     "$IMAGE" -c 'ln -s /data/elsewhere /data/home/.nanobot' >/dev/null
-set +e
 wrong_target_out="$(docker run --rm --user 0:0 \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
     --security-opt no-new-privileges:true \
@@ -580,7 +621,6 @@ wrong_target_out="$(docker run --rm --user 0:0 \
     -v "${PROJECT}_sym_cache:/data/cache" \
     "$IMAGE" /bin/true 2>&1)"
 wrong_target_rc=$?
-set -e
 assert_nonzero_status 19 "wrong-target symlink fails closed" "$wrong_target_rc"
 assert_contains 19 "failure explains the wrong target" "$wrong_target_out" "refusing to retarget symlink"
 assert_eq 19 "wrong-target symlink was not retargeted" "/data/elsewhere" \
@@ -598,7 +638,6 @@ mkdir -p /data/home/.nanobot
 echo old-home > /data/home/.nanobot/old.txt
 echo "__keep__" > /data/config/config.json
 ' >/dev/null
-set +e
 docker run --rm --user 0:0 \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add SETUID --cap-add SETGID \
     --security-opt no-new-privileges:true \
@@ -608,7 +647,6 @@ docker run --rm --user 0:0 \
     -v "${PROJECT}_sym_cache:/data/cache" \
     "$IMAGE" /bin/true >/dev/null 2>&1
 both_rc=$?
-set -e
 assert_eq 19 "both-populated startup exits 0" "0" "$both_rc"
 both_state="$(docker run --rm --user 0:0 --entrypoint /bin/bash \
     -v "${PROJECT}_sym_home3:/data/home" -v "${PROJECT}_sym_config3:/data/config" \
@@ -628,10 +666,8 @@ assert_eq 19 "non-empty home data preserved in legacy directory" "old-home" \
 # A20: update rejection, uv tools, cheat sheet
 # ---------------------------------------------------------------------------
 printf '\n=== A20: update rejection, uv, cheat sheet ===\n'
-set +e
 update_out="$("${COMPOSE[@]}" run --rm --no-deps -T nanobot update 2>&1)"
 update_rc=$?
-set -e
 assert_nonzero_status 20 "nanobot update is rejected" "$update_rc"
 assert_contains 20 "rejection explains it is unsupported" "$update_out" "not supported"
 assert_contains 20 "rejection points at NANOBOT_VERSION" "$update_out" "NANOBOT_VERSION"
@@ -650,6 +686,203 @@ assert_contains 20 "cheat sheet documents pixi global install" "$cheat_sheet" "p
 assert_contains 20 "cheat sheet forbids sudo" "$cheat_sheet" "sudo"
 assert_contains 20 "cheat sheet forbids apt" "$cheat_sheet" "apt"
 assert_contains 20 "cheat sheet documents disposable cache" "$cheat_sheet" "disposable"
+assert_contains 20 "cheat sheet documents NANOBOT_CHANNELS" "$cheat_sheet" "NANOBOT_CHANNELS"
+
+# ---------------------------------------------------------------------------
+# A21: channel dependencies from NANOBOT_CHANNELS
+# ---------------------------------------------------------------------------
+printf '\n=== A21: channel dependencies ===\n'
+assert_eq 21 "/usr/local/bin/nanobot-channels.py is executable" "0" \
+    "$(exec_nanobot test -x /usr/local/bin/nanobot-channels.py >/dev/null 2>&1; echo $?)"
+assert_eq 21 "the image exposes NANOBOT_VERSION" "0.4.2" \
+    "$(docker run --rm --entrypoint sh "$IMAGE" -c 'echo "$NANOBOT_VERSION"' 2>&1)"
+absent_out="$(docker run --rm --entrypoint /app/.venv/bin/python "$IMAGE" \
+    -c 'import discord' 2>&1)"
+absent_rc=$?
+assert_nonzero_status 21 "discord is absent from the image venv until installed" "$absent_rc"
+assert_contains 21 "the absent import fails cleanly" "$absent_out" "ModuleNotFoundError"
+
+cache_before="$(exec_nanobot du -sk /data/cache/uv | cut -f1)"
+
+export NANOBOT_CHANNELS="discord,telegram,slack"
+recreate_start=$SECONDS
+force_recreate
+recreate_seconds=$((SECONDS - recreate_start))
+assert_eq 21 "compose passes NANOBOT_CHANNELS to the container" "discord,telegram,slack" \
+    "$(exec_nanobot_retry printenv NANOBOT_CHANNELS || true)"
+
+channel_logs="$(docker logs "$CID" 2>&1 || true)"
+assert_contains 21 "startup logs the channel dependency install" "$channel_logs" \
+    "installing channel dependencies for: discord, telegram, slack"
+assert_contains 21 "startup confirms the channel dependency install" "$channel_logs" \
+    "installed channel dependencies for: discord, telegram, slack"
+
+channel_imports="$(exec_nanobot_retry /app/.venv/bin/python -c \
+    'import discord, telegram, slack_sdk; print("imports-ok")' 2>&1)"
+assert_eq 21 "discord, telegram, and slack_sdk import from /app/.venv" "imports-ok" \
+    "$channel_imports"
+channel_versions="$(exec_nanobot /app/.venv/bin/python -c '
+from importlib.metadata import version
+from packaging.requirements import Requirement
+checks = (
+    ("discord.py", "discord.py>=2.5.2,<3.0.0"),
+    ("python-telegram-bot", "python-telegram-bot[socks,webhooks]>=22.6,<23.0"),
+    ("slack-sdk", "slack-sdk>=3.39.0,<4.0.0"),
+)
+for name, spec in checks:
+    installed = version(name)
+    if not Requirement(spec).specifier.contains(installed):
+        raise SystemExit(f"{name} {installed} does not satisfy {spec}")
+    print(f"{name}={installed}")
+' 2>&1)"
+assert_contains 21 "discord.py satisfies the manifest constraint" "$channel_versions" "discord.py=2."
+assert_contains 21 "python-telegram-bot satisfies the manifest constraint" \
+    "$channel_versions" "python-telegram-bot=22."
+assert_contains 21 "slack-sdk satisfies the manifest constraint" "$channel_versions" "slack-sdk=3."
+
+gateway_channels_env="$(exec_root sh -c '
+for p in /proc/[0-9]*; do
+    if [ "$(cat "$p/comm" 2>/dev/null)" = "nanobot-gateway" ]; then
+        if tr "\0" "\n" < "$p/environ" | grep -q "^NANOBOT_CHANNELS="; then
+            echo present
+        else
+            echo absent
+        fi
+        break
+    fi
+done
+' 2>/dev/null)"
+assert_eq 21 "the gateway does not inherit NANOBOT_CHANNELS" "absent" "$gateway_channels_env"
+assert_contains 21 "nanobot status still works while NANOBOT_CHANNELS is set" \
+    "$(exec_nanobot_retry sh -c 'nanobot status' 2>&1 || true)" "/data/config/config.json"
+
+cache_after="$(exec_nanobot du -sk /data/cache/uv | cut -f1)"
+if [ "$cache_after" -gt "$cache_before" ]; then
+    pass 21 "channel wheels were written to /data/cache/uv (+$((cache_after - cache_before)) KB)"
+else
+    fail 21 "channel wheels were written to /data/cache/uv (before ${cache_before} KB, after ${cache_after} KB)"
+fi
+printf 'recreate to healthy with installs: %ss, cache: %s\n' \
+    "$recreate_seconds" "$(exec_root du -sh /data/cache/uv 2>&1)"
+
+since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+restart_start=$SECONDS
+restart_service
+restart_seconds=$((SECONDS - restart_start))
+restart_logs="$(docker logs --since "$since" "$CID" 2>&1 || true)"
+for name in discord telegram slack; do
+    assert_contains 21 "channel '$name' dependencies already installed on restart" \
+        "$restart_logs" "channel dependencies for '$name' already installed"
+done
+if printf '%s' "$restart_logs" | grep -Fq "installing channel dependencies"; then
+    fail 21 "restart did not run uv again"
+else
+    pass 21 "restart did not run uv again"
+fi
+printf 'restart to healthy without reinstalling: %ss\n' "$restart_seconds"
+
+offline_start=$SECONDS
+offline_out="$("${COMPOSE[@]}" run --rm --no-deps -T -e UV_OFFLINE=1 nanobot /bin/true 2>&1)"
+offline_rc=$?
+offline_seconds=$((SECONDS - offline_start))
+assert_eq 21 "a fresh container replays the install with UV_OFFLINE=1" "0" "$offline_rc"
+assert_contains 21 "the offline replay installed from the cache" "$offline_out" \
+    "installed channel dependencies for: discord, telegram, slack"
+assert_contains 21 "the offline replay reports the uv result" "$offline_out" "uv:"
+printf 'offline replay in a fresh container: %ss\n' "$offline_seconds"
+
+export NANOBOT_CHANNELS="not-a-real-channel"
+force_recreate
+unknown_logs="$(docker logs "$CID" 2>&1 || true)"
+assert_contains 21 "unknown channel name logs a warning" "$unknown_logs" \
+    "WARNING: unknown channel(s) in NANOBOT_CHANNELS: not-a-real-channel"
+assert_contains 21 "unknown channel warning names the known channels" "$unknown_logs" \
+    "known channels:"
+assert_contains 21 "unknown channel warning points at nanobot channels" "$unknown_logs" \
+    "nanobot channels"
+assert_eq 21 "container is healthy despite the unknown channel" "healthy" "$(health_status)"
+assert_contains 21 "gateway still runs after the unknown channel" \
+    "$(docker top "$CID" -o pid,args 2>/dev/null || true)" "nanobot-gateway"
+export NANOBOT_CHANNELS=""
+
+# ---------------------------------------------------------------------------
+# A22: Homebrew on its own volume, npm global prefix
+#
+# Both are exercised through the env nanobot's WebUI app runner actually passes
+# (nanobot/apps/cli/service.py:_subprocess_env -> HOME, LANG, TERM, PATH,
+# PYTHONUNBUFFERED), not through the image env: that is the path that has to
+# work, and it is the one where HOMEBREW_*/npm_config_* are absent.
+#
+# The formula defaults to `tree` because it is one small bottle. `jq` needs
+# linux-headers/glibc/gcc/binutils (~1.1 GB of bottles) on this Homebrew; use
+# NANOBOT_SMOKE_BREW_FORMULA=jq to run that heavier path deliberately.
+# ---------------------------------------------------------------------------
+printf '\n=== A22: brew volume, bottle install, npm prefix ===\n'
+ALLOWLIST_ENV="env -i HOME=/data/home LANG=C.UTF-8 TERM=dumb PATH=/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1"
+BREW_FORMULA="${NANOBOT_SMOKE_BREW_FORMULA:-tree}"
+
+mounts="$(docker inspect -f '{{range .Mounts}}{{.Type}} {{.Destination}};{{end}}' "$CID")"
+assert_contains 22 "brew is a named volume at /data/brew" "$mounts" "volume /data/brew;"
+assert_eq 22 "the brew wrapper is first on PATH" "/data/home/.local/bin/brew" \
+    "$(exec_nanobot sh -c 'command -v brew')"
+assert_eq 22 "the wrapper resolves to the image's brew entry point" \
+    "/usr/local/bin/nanobot-brew" "$(exec_nanobot readlink -f /data/home/.local/bin/brew)"
+assert_eq 22 "brew --prefix is /data/brew" "/data/brew" \
+    "$(exec_nanobot sh -c 'brew --prefix')"
+assert_contains 22 "brew --version reports Homebrew" \
+    "$(exec_nanobot sh -c 'brew --version' 2>&1)" "Homebrew"
+
+run_detached "brew install $BREW_FORMULA (app-runner env)" \
+    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'brew install $BREW_FORMULA'; echo \$? >/tmp/smoke-cmd.rc" 300
+assert_eq 22 "brew install $BREW_FORMULA succeeds with the app-runner env" "0" "$DETACHED_RC"
+assert_contains 22 "the bottle install reports success" \
+    "$(exec_nanobot sh -c 'cat /tmp/smoke-cmd.log' 2>&1)" "$BREW_FORMULA"
+assert_eq 22 "the wrapper suppresses brew's auto-update git fetch" "0" \
+    "$(exec_nanobot sh -c "grep -c 'Auto-updating Homebrew' /tmp/smoke-cmd.log || true" 2>/dev/null)"
+
+brew_which="$(exec_nanobot sh -c "$ALLOWLIST_ENV /app/.venv/bin/python -c 'import shutil, sys; print(shutil.which(sys.argv[1]) or \"\")' $BREW_FORMULA)" 2>&1)"
+assert_eq 22 "shutil.which finds the bottle binary without HOMEBREW_* vars" \
+    "/data/brew/bin/$BREW_FORMULA" "$brew_which"
+assert_contains 22 "the bottle binary runs" \
+    "$(exec_nanobot sh -c "$ALLOWLIST_ENV $BREW_FORMULA --version" 2>&1)" "$BREW_FORMULA"
+
+assert_eq 22 "npm prefix is recorded in ~/.npmrc" "prefix=/data/home/.local" \
+    "$(exec_nanobot sh -c "grep -x 'prefix=/data/home/.local' /data/home/.npmrc" 2>/dev/null)"
+run_detached "npm install -g cowsay@1.5.0 (app-runner env)" \
+    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'npm install -g cowsay@1.5.0'; echo \$? >/tmp/smoke-cmd.rc" 180
+assert_eq 22 "npm install -g succeeds with the app-runner env" "0" "$DETACHED_RC"
+assert_eq 22 "npm global bins land in ~/.local/bin" "/data/home/.local/bin/cowsay" \
+    "$(exec_nanobot sh -c 'command -v cowsay')"
+assert_contains 22 "the npm-installed CLI runs" \
+    "$(exec_nanobot sh -c "$ALLOWLIST_ENV cowsay -t smoke" 2>&1)" "< smoke >"
+
+# The entrypoint seeds the workspace from nanobot's templates and adds one
+# marked rules block before the gateway starts.
+assert_eq 22 "the workspace AGENTS.md carries exactly one rules block" "1" \
+    "$(exec_nanobot sh -c 'grep -c nanobot-image-env:begin /data/config/workspace/AGENTS.md')"
+exec_nanobot sh -c '/app/.venv/bin/python -B /usr/local/bin/workspace-agents-env.py --seed-templates /data/config/workspace' >/dev/null 2>&1
+exec_nanobot sh -c '/app/.venv/bin/python -B /usr/local/bin/workspace-agents-env.py --seed-templates /data/config/workspace' >/dev/null 2>&1
+assert_eq 22 "re-running the rules helper does not duplicate the block" "1" \
+    "$(exec_nanobot sh -c 'grep -c nanobot-image-env:begin /data/config/workspace/AGENTS.md')"
+assert_eq 22 "the block is closed exactly once" "1" \
+    "$(exec_nanobot sh -c 'grep -c nanobot-image-env:end /data/config/workspace/AGENTS.md')"
+assert_contains 22 "the block states the no-apt/no-sudo rule" \
+    "$(exec_nanobot sh -c 'cat /data/config/workspace/AGENTS.md')" 'no `apt`/`apt-get`/`apk`'
+
+force_recreate
+assert_eq 22 "brew still resolves after a recreate" "/data/home/.local/bin/brew" \
+    "$(exec_nanobot_retry sh -c 'command -v brew')"
+assert_eq 22 "the brew wrapper is still linked after the recreate" \
+    "/usr/local/bin/nanobot-brew" \
+    "$(exec_nanobot_retry readlink -f /data/home/.local/bin/brew)"
+assert_eq 22 "the brew bottle survives the recreate" "/data/brew/bin/$BREW_FORMULA" \
+    "$(exec_nanobot_retry sh -c "env -i HOME=/data/home LANG=C.UTF-8 TERM=dumb PATH=/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 /app/.venv/bin/python -c 'import shutil, sys; print(shutil.which(sys.argv[1]) or \"\")' $BREW_FORMULA" 2>&1)"
+assert_contains 22 "the brew bottle still runs after the recreate" \
+    "$(exec_nanobot sh -c "$ALLOWLIST_ENV $BREW_FORMULA --version" 2>&1)" "$BREW_FORMULA"
+assert_eq 22 "npm prefix survives the recreate" "/data/home/.local" \
+    "$(exec_nanobot sh -c "$ALLOWLIST_ENV npm prefix -g" 2>&1)"
+assert_contains 22 "the npm-installed CLI still runs after the recreate" \
+    "$(exec_nanobot sh -c "$ALLOWLIST_ENV cowsay -t again" 2>&1)" "< again >"
 
 # ---------------------------------------------------------------------------
 printf '\n=== summary ===\n'
@@ -658,4 +891,4 @@ printf 'failed checks: %d\n' "$FAILED"
 if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
-printf 'ALL A1-A20 PASSED\n'
+printf 'ALL A1-A22 PASSED\n'

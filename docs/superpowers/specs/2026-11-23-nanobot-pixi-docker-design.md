@@ -1,14 +1,15 @@
 # nanobot + pixi Docker image — design
 
 Date: 2026-11-23
-Status: implemented and verified (126 acceptance checks passed)
-Revision: 3 (four-way persistent split, root→setpriv entrypoint)
+Status: implemented and verified (revision 4: 153 acceptance checks A1–A21; revision 5 adds A22)
+Revision: 5 (Homebrew on its own volume, npm global prefix, durable workspace rules)
 
 ## Intent
 
 Run `nanobot-ai==0.4.2` in a reproducible Docker container with:
 
-- four independent persistent trees: config, home, pixi tools, disposable cache;
+- four independent persistent trees: config, home, pixi tools, disposable cache
+  (revision 5 adds a fifth, `/data/brew`, on its own volume);
 - pixi as the supported way for the bot to install native/CLI tools at runtime;
 - a dedicated non-root `nanobot` user with no `sudo` and no passwordless
   escalation;
@@ -28,11 +29,12 @@ Run `nanobot-ai==0.4.2` in a reproducible Docker container with:
   | `/data/config` | `NANOBOT_HOME=/data/config` (image-level helper variable) | nanobot config, sessions, memory, workspace | resets config/history; home/pixi/cache survive |
   | `/data/home` | `HOME=/data/home`, `UV_TOOL_DIR=/data/home/.local/share/uv/tools`, `UV_TOOL_BIN_DIR=/data/home/.local/bin` | dotfiles, SSH/CLI config, user files, uv tools | resets home; config/pixi/cache survive |
   | `/data/pixi` | `PIXI_HOME=/data/pixi` | pixi global envs, exposed binaries, global manifest | resets tools; config/home/cache survive |
-  | `/data/cache` | `XDG_CACHE_HOME=/data/cache`, `PIXI_CACHE_DIR=/data/cache/pixi`, `UV_CACHE_DIR=/data/cache/uv`, `PIP_CACHE_DIR=/data/cache/pip` | 100% disposable caches | safe to delete; tools/config survive |
+  | `/data/cache` | `XDG_CACHE_HOME=/data/cache`, `PIXI_CACHE_DIR=/data/cache/pixi`, `UV_CACHE_DIR=/data/cache/uv`, `PIP_CACHE_DIR=/data/cache/pip`, `HOMEBREW_CACHE=/data/cache/brew` | 100% disposable caches | safe to delete; tools/config survive |
+  | `/data/brew` | `HOMEBREW_PREFIX=/data/brew` (revision 5) | Homebrew repo, Cellar, formula binaries | resets brew formulas; everything else survives |
 
 - `PATH` starts with `/data/pixi/bin`, then `/data/home/.local/bin`, then
-  `/app/.venv/bin`, so runtime-installed tools are visible to the running
-  gateway immediately.
+  `/data/brew/bin` (revision 5), then `/app/.venv/bin`, so runtime-installed
+  tools are visible to the running gateway immediately.
 - `/data/home/.nanobot` is a symlink to `/data/config`. This makes the gateway
   and ad-hoc `nanobot` commands use `/data/config` without a wrapper or
   `--home` flag.
@@ -110,9 +112,10 @@ Run `nanobot-ai==0.4.2` in a reproducible Docker container with:
   `sitecustomize.py` in `/app/.venv` that calls
   `set_home_path($NANOBOT_HOME)` at interpreter startup. It affects only the
   nanobot venv, does not change file layout, and lets an explicit `--home`
-  override it. This is the only runtime shim; the alternative (a `nanobot`
-  wrapper) was rejected because the symlink already handles filesystem
-  resolution.
+  override it. Revision 4 adds one more job to the same shim (dropping
+  `NANOBOT_CHANNELS`); it is otherwise the only runtime shim. The alternative
+  (a `nanobot` wrapper) was rejected because the symlink already handles
+  filesystem resolution.
 
 ## Privilege model
 
@@ -213,7 +216,16 @@ UV_CACHE_DIR=/data/cache/uv
 UV_TOOL_DIR=/data/home/.local/share/uv/tools
 UV_TOOL_BIN_DIR=/data/home/.local/bin
 PIP_CACHE_DIR=/data/cache/pip
-PATH=/data/pixi/bin:/data/home/.local/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOMEBREW_PREFIX=/data/brew
+HOMEBREW_CELLAR=/data/brew/Cellar
+HOMEBREW_REPOSITORY=/data/brew/Homebrew
+HOMEBREW_CACHE=/data/cache/brew
+HOMEBREW_NO_AUTO_UPDATE=1
+HOMEBREW_NO_ANALYTICS=1
+HOMEBREW_NO_ENV_HINTS=1
+npm_config_prefix=/data/home/.local
+npm_config_cache=/data/home/.npm
+PATH=/data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LANG=C.UTF-8
 LC_ALL=C.UTF-8
 PYTHONUNBUFFERED=1
@@ -471,7 +483,8 @@ the implementation plan does not have to guess.
    ephemeral and are replayed on the next container start, using
    `/data/cache/pip` and `/data/cache/uv` for speed. Persistent native/CLI
    tools remain pixi's job. A `NANOBOT_CHANNELS` build arg is out of scope for
-   this deliverable.
+   this deliverable; the startup variable added in revision 4 is separate from
+   the image build.
 2. **bubblewrap.** Not installed. It cannot run under `cap_drop: ALL` +
    `no-new-privileges` without a relaxed seccomp profile and extra
    capabilities, which conflicts with the requested security model. README
@@ -482,18 +495,109 @@ the implementation plan does not have to guess.
    for multi-arch builds, but publishing is not part of the work.
 4. **Image reference.** `.env.example` defaults to
    `NANOBOT_IMAGE=nanobot-pixi:0.4.2`; Portainer users replace it with their
-   registry path. No registry credentials, CI, or push are in scope. The base
-   Compose file never builds.
+   registry path. Registry publishing was added in revision 4; the base
+   Compose file still never builds.
 5. **Upgrades.** Upgrading is a manual, backup-gated image rebuild. The
    entrypoint rejects an in-container `nanobot update` with a message to
    rebuild with a new `NANOBOT_VERSION`. A pixi version bump keeps
    `/data/pixi`; if a new pixi cannot read old global envs, the documented fix
    is to wipe `/data/pixi` and let `EXTRA_PIXI_PACKAGES` reinstall. No
    automatic config migration or version check is added.
-6. **Host support.** Named volumes are the verified path on Linux and Docker
-   Desktop. The bind-mount recipe is Linux-only because host ownership is the
-   operator's responsibility; there is no non-root workaround for Docker
-   Desktop bind mounts, and the README says so.
+6. **Host support.** Named volumes are the default and the verified path on
+   Linux and Docker Desktop. The optional bind overlay is verified on Docker
+   Desktop/Windows (revision 4); on Linux the four host directories must be
+   writable by the build UID/GID (default 1000), which is the operator's
+   responsibility.
+
+## Revision 4: channel dependencies at startup
+
+Revision 4 adds `NANOBOT_CHANNELS` startup installation of channel
+dependencies on top of revision 3.
+
+### `NANOBOT_CHANNELS`
+
+- `scripts/nanobot-channels.py` runs in the entrypoint's unprivileged phase
+  with `/app/.venv/bin/python`, after `EXTRA_PIXI_PACKAGES` and before the
+  command is normalised and `exec`ed. It parses `NANOBOT_CHANNELS` on commas
+  and whitespace, resolves each name with
+  `nanobot.channels.registry.discover_plugins()`, and reads
+  `ChannelPlugin.dependencies` from the channel manifests. Requirements are
+  filtered with `nanobot.optional_features.install_args_for_extra()` and
+  checked with `extra_installed()`; only the missing ones reach uv, in a single
+  `uv pip install --python /app/.venv/bin/python ...` call with
+  `UV_CACHE_DIR=/data/cache/uv` and `UV_LINK_MODE=copy`.
+- Why not package extras: `nanobot_ai-0.4.2.dist-info/METADATA` declares only
+  `api`, `azure`, `bedrock`, `dev`, `documents`, `langfuse`, `olostep`, and
+  `pdf`. `uv pip install 'nanobot-ai[discord]==0.4.2'` exits 0 without
+  changes, so the channel manifests are the only source of truth for a
+  channel's requirements.
+- Idempotency: the satisfied-check reads installed distribution metadata, so a
+  restart of the same container does not invoke uv. A recreate starts from the
+  image's venv and replays the install from `/data/cache/uv`; the acceptance
+  suite proves this by replaying in a fresh container with `UV_OFFLINE=1`.
+- Failure policy: the helper logs `[channels] WARNING: ...`, names the known
+  channels, points at `nanobot channels`, and exits 0. The entrypoint also
+  wraps the call, so even an unexpected helper crash is a warning and never a
+  failed start. A half-applied install is reported, not treated as success.
+- `ENV NANOBOT_VERSION=${NANOBOT_VERSION}` is baked into the runtime image so
+  the installed version is readable from inside the container.
+- Compatibility with nanobot's own environment settings: `Config` uses
+  `env_prefix="NANOBOT_"`, so an environment variable named `NANOBOT_CHANNELS`
+  is parsed as the whole `channels` mapping, and any value (including the empty
+  string) fails validation. Verified in the image. The entrypoint therefore
+  reads the value, passes it to the helper as an argument, and unsets it before
+  bootstrap/exec; the venv `sitecustomize.py` drops it at interpreter startup
+  as well, so `docker exec ... nanobot ...` (which inherits the container env)
+  keeps working.
+- Compose passes `NANOBOT_CHANNELS`; `.env.example` documents it; the bot
+  cheat sheet and README describe it, including that a channel enabled through
+  the WebUI already installs its own manifest dependencies.
+
+### Bind-mount persistence
+
+- `compose.bind.yaml` is an overlay that replaces all four named volumes with
+  `./data/{config,home,pixi,cache}`. Compose merges `volumes` by target, so the
+  entries override rather than append; `docker compose -f compose.yaml
+  -f compose.bind.yaml config` shows four bind mounts and no volume at `/data`.
+  `compose.yaml` keeps the named volumes and `container_name: nanobot` for
+  operators.
+- Verified on the Windows/Docker Desktop host: directories created by Docker,
+  healthy start, `/data/home/.nanobot -> /data/config` created and kept across a
+  recreate and `down`/`up`, writes as `nanobot` in all four trees, `.ssh` at
+  `0700` kept across a recreate, config/sessions/workspace surviving `down` +
+  `up`, and channel wheels cached in `./data/cache/uv`.
+  `scripts/bind-mode-check.ps1` repeats this against a scratch root; it stages
+  the Compose files there, so an operator's `./data` is never touched.
+- Windows filesystem notes: Docker Desktop reports the host directories as
+  `0777` owned by `nanobot`; Unix modes are emulated (a `0700` `.ssh` holds in
+  the container's view) and Windows ACLs are not mapped, so the folder's
+  protection is the host's, not the container's. On Linux the host directories
+  must be writable by UID/GID 1000.
+- One writer per data folder. Two containers on the same `./data` race in
+  `GitStore.init()`, which checks `is_initialized()` and then calls
+  `porcelain.init`: the loser gets `FileExistsError` and
+  `sync_workspace_templates` logs `GitStoreError: Git store init failed for
+  /data/config/workspace`; startup continues without memory history. This is
+  check-then-act behaviour in upstream nanobot, not a bind artifact.
+
+### Acceptance-suite isolation
+
+- `scripts/smoke-test.sh` runs `compose.yaml` through
+  `scripts/smoke-compose.yaml`, which overrides `container_name` to
+  `${PROJECT}-nanobot`, and exports distinct host ports (18766 web, 18791
+  health). Without the override the suite took over an operator's `nanobot`
+  container and its `down --remove-orphans` deleted that container.
+- Cleanup removes containers by project label and by project-name prefix, the
+  four volumes, and the project network; nothing outside the project is
+  touched. An operator stack running through a full suite kept its container id,
+  start time and health.
+
+### Build-context hygiene
+
+`.gitignore` covers local `.env` files, `*.log`, and the bind-mount surface
+`data/`, so host data is never committed; `.dockerignore` also excludes `*.log`
+and the test-only scripts. The files the image needs
+(`scripts/*.py`, `etc/`, `entrypoint.sh`, `Dockerfile`) stay in the context.
 
 ## Risks / notes
 
@@ -516,3 +620,131 @@ the implementation plan does not have to guess.
   `NANOBOT_HEALTH_HOST_PORT` only moves the host-side published port.
 - **`nanobot update`**: unsupported in-container; rebuild with a new
   `NANOBOT_VERSION`.
+
+## Revision 5: Homebrew, npm prefix, durable workspace rules
+
+Revision 5 makes three installed-tool paths durable and gives the agent rules it
+actually reads. The trigger is a measured constraint: nanobot's WebUI app runner
+(`nanobot/apps/cli/service.py`, `_subprocess_env()`) builds the environment for
+install and run subprocesses from an allowlist of `HOME`, `LANG`, `TERM`, `PATH`,
+`PYTHONUNBUFFERED` (plus `XDG_RUNTIME_DIR` when present). No image `ENV` value
+reaches `brew` or `npm` there.
+
+### Homebrew baked into `/data/brew`
+
+- Runtime stage: `apt` gains `xz-utils` only. A probe on the pre-revision image
+  (git/curl/ca-certificates, no ruby, gcc, make, patch, file, or procps)
+  installed a bottle successfully, so nothing else is required for bottle
+  installs; source builds are out of scope.
+- The install step runs as `nanobot` (brew refuses root), then `USER root` is
+  restored:
+  - `git clone --depth 1 --single-branch https://github.com/Homebrew/brew
+    /data/brew/Homebrew` plus `ln -s ../Homebrew/bin/brew /data/brew/bin/brew`.
+    That is the official custom-prefix layout, and it is what makes brew work
+    with no `HOMEBREW_*` in the environment: `bin/brew` resolves its prefix from
+    its own path. Measured with `env -i HOME=/data/home LANG=C.UTF-8 TERM=dumb
+    PATH=...`: `brew --prefix` → `/data/brew`, `--cellar` → `/data/brew/Cellar`,
+    `--repository` → `/data/brew/Homebrew`.
+  - `brew --version` is answered by `bin/brew` without Ruby; `brew config` is
+    the first command that needs it and vendors Homebrew's portable Ruby
+    (4.0.10 in the built image) under
+    `/data/brew/Homebrew/Library/Homebrew/vendor/portable-ruby/`. Running it at
+    build time means a fresh volume seeded from the image can run brew with no
+    network.
+  - Both build calls use `HOMEBREW_CACHE=/tmp/brew-cache` and remove it, so the
+    API index and the Ruby tarball (measured 45 MB) do not end up in the image
+    behind a runtime volume. Measured cost of the whole step: one 85.7 MB layer
+    (`/data/brew` is 82 MB: 37 MB clone, 45 MB vendored Ruby).
+- No formulae are installed at build time; bottles live in the volume.
+- Measured image size: `nanobot-pixi:0.4.2` 1,089,052,882 B (1.09 GB) before,
+  1,200,119,593 B (1.20 GB) after: +111,066,711 B (+105.9 MiB), of which the
+  brew layer is 85.7 MB and the rest is `xz-utils` plus layer bookkeeping.
+
+### The `nanobot_brew` volume
+
+- `compose.yaml` declares `nanobot_brew:/data/brew`. It stays a named volume in
+  **both** modes: `compose.bind.yaml` deliberately does not override it, and
+  `docker compose -f compose.yaml -f compose.bind.yaml config` shows four binds
+  plus one volume, at `/data/brew`.
+- Why brew is the one non-`./data` tree: Homebrew rewrites its own git checkout
+  during auto-update and unpacks bottles in the hundreds of megabytes. On Windows
+  `./data` is a 9p/drvfs share, where that write pattern is slow and has already
+  destabilised the Docker engine on this host. Brew work must stay on ext4.
+- The entrypoint creates `/data/brew` and `/data/cache/brew`, includes
+  `$HOMEBREW_PREFIX` in the mismatched-owner scan, and never runs
+  `brew update`/`brew upgrade`. A fresh empty volume is seeded by Docker from
+  the image, so brew works on first boot without network.
+
+### Measured behaviour of the WebUI path
+
+- `brew install tree` under the full allowlist env: rc 0 in 23 s from a fresh
+  volume; `shutil.which("tree")` → `/data/brew/bin/tree`; survives
+  `--force-recreate`.
+- `brew install jq` under the same env: rc 0, but only after its dependency
+  chain was already poured. That chain is linux-headers@6.8, glibc, gmp, isl,
+  mpfr, libmpc, lz4, xz, zlib-ng-compat, zstd, binutils, gcc, oniguruma —
+  ≈1.1 GB of bottles. A first-time pour took 120 s in the pre-revision probe.
+- Because `HOMEBREW_NO_AUTO_UPDATE` is stripped too, a WebUI install runs brew's
+  auto-update against `/data/brew` (git work on ext4, accepted for this reason;
+  the `.git` directory grew from 37 MB to 144 MB in the probe).
+- `HOMEBREW_CACHE` is stripped as well, so brew would fall back to
+  `$HOME/.cache/Homebrew` (measured: 258 MB of bottles in the home tree). The
+  entrypoint symlinks `~/.cache/Homebrew` to `/data/cache/brew` so downloads
+  stay in the disposable cache. Existing non-symlink paths are left alone with a
+  warning.
+
+### npm global prefix
+
+- Image env: `npm_config_prefix=/data/home/.local`,
+  `npm_config_cache=/data/home/.npm`.
+- Env alone is not enough for the same stripped-env reason: measured
+  `npm prefix -g` under the allowlist env with the user config ignored is
+  `/data/pixi/envs/nodejs` (inside the pixi node environment, not on `PATH`), so
+  `shutil.which(entry_point)` would fail after a successful install.
+- `npm` does read `$HOME/.npmrc`, and `HOME` is passed through and persistent, so
+  the entrypoint writes `prefix=` and `cache=` there. Measured: the same command
+  then reports `/data/home/.local`, `npm install -g cowsay@1.5.0` succeeds under
+  the allowlist env, `command -v cowsay` → `/data/home/.local/bin/cowsay`, and
+  it still runs after `--force-recreate`.
+- Keys already present in an operator's `~/.npmrc` are never rewritten; the
+  entrypoint warns and keeps them.
+
+### Durable workspace rules
+
+- Verified: `nanobot/agent/context.py` injects only the workspace `AGENTS.md`,
+  `SOUL.md`, and `USER.md`, and skips `AGENTS.md`/`USER.md` while they equal the
+  bundled template (`BOOTSTRAP_FILES`, `_SKIPPABLE_DEFAULTS`). `/etc/
+  nanobot-env.md` is never read automatically, so it is documentation only.
+- `scripts/workspace-agents-env.py` maintains one block between
+  `<!-- nanobot-image-env:begin -->` and `<!-- nanobot-image-env:end -->`: no
+  `apt`/`apt-get`/`apk` and no `sudo`; `pixi global install` for native tools;
+  `npx`/`npm i -g` for JS tools; brew at `/data/brew` for WebUI Apps; `/app/
+  .venv` is ephemeral; `nanobot update` is rejected; and what each `/data` tree
+  survives.
+- Discovered while verifying: the gateway, not the entrypoint, creates the
+  workspace files from the bundled templates (`sync_workspace_templates`, called
+  from `cli/gateway_runtime.py`). Without help the block would only appear on
+  the second start. The helper takes `--seed-templates` and calls nanobot's own
+  `sync_workspace_templates` (idempotent, only missing files) before editing, so
+  the rules exist before the first agent turn.
+- Idempotent: replacing the block in place, byte-exact round-trip for everything
+  outside it, no write when nothing changed (measured: two extra runs report
+  "already current" and the marker counts stay at 1); a file without markers gets
+  one block appended; an unterminated marker is reported and left untouched.
+
+### Acceptance
+
+- `scripts/smoke-test.sh` gains A22: `/data/brew` is a named volume, brew
+  resolves with the expected prefix, a bottle install runs through the app
+  runner's env allowlist, `shutil.which` finds the binary with those variables
+  absent, the npm prefix comes from `~/.npmrc`, an npm global install lands in
+  `~/.local/bin` and runs, the `AGENTS.md` block exists exactly once and a
+  re-run does not duplicate it, and brew, the bottle, the npm binary and the npm
+  prefix all survive `--force-recreate`.
+- A22 installs `tree` by default: it is one small bottle. `jq` pulls the ≈1.1 GB
+  chain above and is opt-in through `NANOBOT_SMOKE_BREW_FORMULA=jq`. On this
+  Windows host the first-time pour of that chain coincided with a Docker Desktop
+  engine failure (`docker exec` → HTTP 500, then the WSL engine failing to start
+  with `exit status 0xc00000fd`), the same failure signature the 9p brew spike
+  produced; the run was resumed detached and finished in 4 s. The suite must not
+  depend on that payload.
