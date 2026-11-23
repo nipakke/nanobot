@@ -282,9 +282,9 @@ docker compose exec -u nanobot brew install tree   # -> /data/brew/bin/tree
   the image reaches `brew`. It nevertheless works because `brew` derives its
   prefix from the location of `bin/brew` (`/data/brew/bin/brew` ->
   `../Homebrew/bin/brew`), and because Homebrew's portable Ruby is vendored at
-  build time. A WebUI `brew install` therefore also runs brew's own
-  auto-update — git work inside `/data/brew` (ext4), which is exactly why brew
-  is not on the bind.
+  build time. `$HOME/.local/bin/brew` is a symlink to a wrapper that restores
+  the missing `HOMEBREW_*` values before running the real `bin/brew` — see
+  [The brew wrapper on PATH](#the-brew-wrapper-on-path).
 - **Bottle cache.** With the image env, `HOMEBREW_CACHE=/data/cache/brew`. Under
   the WebUI's stripped env brew would fall back to `$HOME/.cache/Homebrew`, so
   the entrypoint symlinks that path to `/data/cache/brew`: downloads stay in the
@@ -299,6 +299,41 @@ docker compose exec -u nanobot brew install tree   # -> /data/brew/bin/tree
   -u nanobot <image> tar -C /data -czf /out/brew.tgz brew`.
 - Brew is never updated or upgraded by the entrypoint. It is pinned by the
   image; rebuilding with a new image refreshes it.
+
+### The brew wrapper on PATH
+
+`scripts/brew-wrapper.sh` is copied into the image as
+`/usr/local/bin/nanobot-brew`, and the `nanobot` phase of the entrypoint links
+`$HOME/.local/bin/brew` to it. Because `$HOME/.local/bin` precedes
+`/data/brew/bin` on `PATH`, both `docker compose exec -u nanobot brew ...` and
+a WebUI `brew install` reach the wrapper instead of the binary directly.
+
+The wrapper restores the image's defaults and then `exec`s the real binary:
+
+```sh
+HOMEBREW_PREFIX=/data/brew
+HOMEBREW_CELLAR=/data/brew/Cellar
+HOMEBREW_REPOSITORY=/data/brew/Homebrew
+HOMEBREW_CACHE=/data/cache/brew
+HOMEBREW_NO_AUTO_UPDATE=1
+HOMEBREW_NO_ANALYTICS=1
+HOMEBREW_NO_ENV_HINTS=1
+```
+
+Each value is a shell default (`: "${VAR:=value}"`), so a value already in the
+environment wins: `HOMEBREW_NO_AUTO_UPDATE=0` reaches brew unchanged, and the
+same applies to every other variable in the list.
+
+`HOMEBREW_NO_AUTO_UPDATE` is the one that matters. Without it, every WebUI
+`brew install` starts with `brew update`, a git fetch that rewrites the
+repository in `/data/brew`. That write burst repeatedly took the Docker engine
+down on the Windows/WSL host this image was built on (`docker exec` -> HTTP
+500, then the WSL bootstrap failing with `0xc00000fd`). The wrapper adds no
+capability; it only keeps brew from rewriting its own checkout on each install.
+
+If `$HOME/.local/bin/brew` already exists as a regular file or as a symlink to
+another target, the entrypoint warns and leaves it alone. That `brew` keeps its
+own behaviour, including auto-update; nothing is overwritten.
 
 ## npm and JS tools
 
@@ -550,9 +585,11 @@ is unaffected.
   ephemeral and replayed on the next start, sped up by the caches in
   `/data/cache`. `NANOBOT_CHANNELS` automates that at startup from the channel
   manifests' own requirements.
-- `HOMEBREW_*` and `npm_config_*` are image-level; the WebUI app runner strips
-  them. Persistence comes from where things live (`/data/brew`, and
-  `~/.npmrc` + `~/.cache/Homebrew` for npm/brew caches), not from the env.
+- `HOMEBREW_*` and `npm_config_*` are image-level, and the WebUI app runner
+  strips them. Persistence comes from where things live (`/data/brew`, and
+  `~/.npmrc` + `~/.cache/Homebrew` for npm/brew caches), not from the env: the
+  wrapper behind `~/.local/bin/brew` restores the `HOMEBREW_*` defaults for
+  that path, and `npm` reads its prefix from `~/.npmrc`.
 - The healthcheck uses `/app/.venv/bin/python -B` and stdlib only; it does not
   require curl and does not leave root-owned `__pycache__` files.
 
@@ -577,10 +614,17 @@ linux-headers/glibc/gcc/binutils (~1.1 GB of bottles) and is opt-in:
 NANOBOT_SMOKE_BREW_FORMULA=jq bash scripts/smoke-test.sh
 ```
 
+A22 also asserts that `command -v brew` resolves to `$HOME/.local/bin/brew`,
+that this link resolves to `/usr/local/bin/nanobot-brew`, and that the install
+log contains no `Auto-updating Homebrew` line.
+
 It uses a unique Compose project name, container name
 (`nanobot-smoke-<pid>-nanobot`), and host ports (18766 web, 18791 health), so it
-can run next to a live stack. It cleans up only its own containers, volumes,
-and network.
+can run next to a live stack. Both host ports are overridable with
+`NANOBOT_SMOKE_WEB_PORT` / `NANOBOT_SMOKE_HEALTH_PORT`; on Windows hosts whose
+excluded port ranges cover the defaults, Docker Desktop fails with
+`forwards/expose ... 500` and an access-denied bind, so pick free ports. It
+cleans up only its own containers, volumes, and network.
 
 Bind-mode persistence has its own repeatable check (see
 [Host support and persistence modes](#host-support-and-persistence-modes)):

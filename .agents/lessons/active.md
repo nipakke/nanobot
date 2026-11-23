@@ -49,3 +49,23 @@
 - Agent did: Relied on the symlink alone and expected the printed path to be canonical.
 - Trigger: Acceptance check A9 (`nanobot status` path) failed with the symlink path.
 - Evidence: `nanobot status` output; `scripts/sitecustomize.py`; design "As-built shim" note.
+
+## L-0006 — Brew is a WebUI app-install backend, not an agent tool
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: correction
+- What happened / correction: Brew exists only to serve WebUI Apps whose install command is `brew install <pkg>`; installs arrive through the Apps screen / catalog. The agent must not treat brew as a general-purpose tool and must not shop or install arbitrary packages with it.
+- Agent did: Treated brew as a general tool the agent could install anything with.
+- Trigger: Homebrew baked into `/data/brew` for the WebUI Apps feature.
+- Evidence: HANDOFF.md "Lessons to capture" item 1; README.md:257-264 ("Homebrew" section); design spec Homebrew sections.
+
+## L-0008 — Verify WebUI install paths under the stripped env allowlist
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: friction
+- What happened / correction: nanobot's app runner (`apps/cli/service.py:_subprocess_env`) starts installs with only `HOME`, `LANG`, `TERM`, `PATH` and `PYTHONUNBUFFERED`, so no `HOMEBREW_*` or `npm_config_*` from the image reaches `brew`/`npm`. Install-path checks must run under that stripped env (`env -i` plus those five variables), never under the full container environment, which hides the failure.
+- Agent did: Verified brew/npm installs under the full container environment, which masked the stripped-env failure.
+- Trigger: WebUI app install path checks.
+- Evidence: HANDOFF.md "Hard-won constraints" second bullet; `scripts/brew-wrapper.sh:4-13`; `entrypoint.sh:316-323`.

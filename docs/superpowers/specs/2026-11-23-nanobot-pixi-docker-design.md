@@ -1,7 +1,7 @@
 # nanobot + pixi Docker image — design
 
 Date: 2026-11-23
-Status: implemented and verified (revision 4: 153 acceptance checks A1–A21; revision 5 adds A22)
+Status: implemented and verified (revision 5: 177 acceptance checks A1–A22).
 Revision: 5 (Homebrew on its own volume, npm global prefix, durable workspace rules)
 
 ## Intent
@@ -656,6 +656,14 @@ reaches `brew` or `npm` there.
     behind a runtime volume. Measured cost of the whole step: one 85.7 MB layer
     (`/data/brew` is 82 MB: 37 MB clone, 45 MB vendored Ruby).
 - No formulae are installed at build time; bottles live in the volume.
+- `scripts/brew-wrapper.sh` becomes `/usr/local/bin/nanobot-brew`, and the
+  entrypoint links `$HOME/.local/bin/brew` to it. That link precedes
+  `/data/brew/bin` on `PATH`, so exec and WebUI installs both resolve `brew`
+  through the wrapper. It sets the image's `HOMEBREW_*` values as shell
+  defaults (`: "${VAR:=value}"`, so an explicit value in the environment wins)
+  and then `exec`s `/data/brew/bin/brew`. If `$HOME/.local/bin/brew` already
+  exists as a regular file or as a symlink to another target, the entrypoint
+  warns and leaves it in place.
 - Measured image size: `nanobot-pixi:0.4.2` 1,089,052,882 B (1.09 GB) before,
   1,200,119,593 B (1.20 GB) after: +111,066,711 B (+105.9 MiB), of which the
   brew layer is 85.7 MB and the rest is `xz-utils` plus layer bookkeeping.
@@ -684,9 +692,11 @@ reaches `brew` or `npm` there.
   chain was already poured. That chain is linux-headers@6.8, glibc, gmp, isl,
   mpfr, libmpc, lz4, xz, zlib-ng-compat, zstd, binutils, gcc, oniguruma —
   ≈1.1 GB of bottles. A first-time pour took 120 s in the pre-revision probe.
-- Because `HOMEBREW_NO_AUTO_UPDATE` is stripped too, a WebUI install runs brew's
-  auto-update against `/data/brew` (git work on ext4, accepted for this reason;
-  the `.git` directory grew from 37 MB to 144 MB in the probe).
+- `HOMEBREW_NO_AUTO_UPDATE` is stripped as well; the wrapper restores it, so
+  the WebUI path does not auto-update. Measured before the wrapper existed: a
+  WebUI install ran brew's auto-update against `/data/brew` (git work on ext4;
+  the `.git` directory grew from 37 MB to 144 MB in the probe) — the reason
+  brew is not on the bind.
 - `HOMEBREW_CACHE` is stripped as well, so brew would fall back to
   `$HOME/.cache/Homebrew` (measured: 258 MB of bottles in the home tree). The
   entrypoint symlinks `~/.cache/Homebrew` to `/data/cache/brew` so downloads
@@ -740,7 +750,9 @@ reaches `brew` or `npm` there.
   absent, the npm prefix comes from `~/.npmrc`, an npm global install lands in
   `~/.local/bin` and runs, the `AGENTS.md` block exists exactly once and a
   re-run does not duplicate it, and brew, the bottle, the npm binary and the npm
-  prefix all survive `--force-recreate`.
+  prefix all survive `--force-recreate`. It also asserts that `command -v brew`
+  resolves to the wrapper (`~/.local/bin/brew` -> `/usr/local/bin/nanobot-brew`)
+  and that the install log contains no `Auto-updating Homebrew` line.
 - A22 installs `tree` by default: it is one small bottle. `jq` pulls the ≈1.1 GB
   chain above and is opt-in through `NANOBOT_SMOKE_BREW_FORMULA=jq`. On this
   Windows host the first-time pour of that chain coincided with a Docker Desktop

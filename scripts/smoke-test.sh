@@ -154,7 +154,7 @@ run_detached() {
 
     exec_nanobot rm -f /tmp/smoke-cmd.rc /tmp/smoke-cmd.log >/dev/null 2>&1
     docker exec -d -u nanobot "$CID" sh -c \
-        "$command >/tmp/smoke-cmd.log 2>&1; echo \$? >/tmp/smoke-cmd.rc" >/dev/null 2>&1
+        "{ $command ; } >/tmp/smoke-cmd.log 2>&1; echo \$? >/tmp/smoke-cmd.rc" >/dev/null 2>&1
     printf '%s: ' "$label"
     while [ "$waited" -lt "$limit" ]; do
         rc="$(exec_nanobot sh -c 'cat /tmp/smoke-cmd.rc 2>/dev/null' 2>/dev/null || true)"
@@ -220,15 +220,20 @@ for volume in "${VOLUMES[@]}"; do
     docker volume create "$volume" >/dev/null || fatal "could not create $volume"
 done
 
+# Host ports are distinct from the operator defaults (8765, 18790) so the suite
+# can run next to a live stack; the container-side ports stay 8765 and 18790.
+# Both host ports are overridable on hosts where the defaults are unavailable:
+# NANOBOT_SMOKE_WEB_PORT and NANOBOT_SMOKE_HEALTH_PORT.
+WEB_HOST_PORT="${NANOBOT_SMOKE_WEB_PORT:-18766}"
+HEALTH_HOST_PORT="${NANOBOT_SMOKE_HEALTH_PORT:-18791}"
+
 export NANOBOT_IMAGE="$IMAGE"
 export EXTRA_PIXI_PACKAGES="jq,ripgrep,nodejs"
 export TZ="UTC"
-export NANOBOT_HEALTH_HOST_PORT="18791"
+export NANOBOT_HEALTH_HOST_PORT="$HEALTH_HOST_PORT"
 export NANOBOT_HEALTH_PORT="18790"
 export NANOBOT_WEB_TOKEN="smoke-web-token"
-# Host ports are distinct from the operator defaults (8765, 18790) so the suite
-# can run next to a live stack; the container-side ports stay 8765 and 18790.
-export NANOBOT_WEB_PORT="18766"
+export NANOBOT_WEB_PORT="$WEB_HOST_PORT"
 
 if "${COMPOSE[@]}" up -d --no-build --wait --wait-timeout 300; then
     pass 6 "startup fixes ownership on fresh root-owned volumes and becomes healthy"
@@ -292,8 +297,8 @@ for pair in \
 done
 path_value="$(exec_nanobot printenv PATH || true)"
 case "$path_value" in
-    /data/pixi/bin:/data/home/.local/bin:/app/.venv/bin:*) pass 3 "PATH starts with pixi, home bin, venv" ;;
-    *) fail 3 "PATH starts with pixi, home bin, venv (got [$path_value])" ;;
+    /data/pixi/bin:/data/home/.local/bin:/data/brew/bin:/app/.venv/bin:*) pass 3 "PATH starts with pixi, home bin, brew, venv" ;;
+    *) fail 3 "PATH starts with pixi, home bin, brew, venv (got [$path_value])" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -519,20 +524,21 @@ healthcheck_test="$(docker inspect -f '{{json .Config.Healthcheck.Test}}' "$CID"
 assert_contains 17 "healthcheck uses -B" "$healthcheck_test" '"-B"'
 assert_contains 17 "healthcheck runs the stdlib script" "$healthcheck_test" "/usr/local/bin/healthcheck.py"
 port_map="$(docker port "$CID" 18790 2>&1)"
-assert_contains 17 "container port 18790 is published on host 18791" "$port_map" "127.0.0.1:18791"
+assert_contains 17 "container port 18790 is published on host $HEALTH_HOST_PORT" \
+    "$port_map" "127.0.0.1:$HEALTH_HOST_PORT"
 assert_eq 17 "container NANOBOT_HEALTH_PORT is 18790" "18790" \
     "$(exec_root printenv NANOBOT_HEALTH_PORT || true)"
 
 host_health=""
 if command -v curl >/dev/null 2>&1; then
     host_health="$(curl -sS --max-time 5 -w '\nHTTP=%{http_code}' \
-        http://127.0.0.1:18791/health 2>&1 || true)"
+        "http://127.0.0.1:${HEALTH_HOST_PORT}/health" 2>&1 || true)"
 fi
 if [ -z "$host_health" ] && [ -x /mnt/c/Windows/System32/curl.exe ]; then
     host_health="$(/mnt/c/Windows/System32/curl.exe -sS --max-time 5 -w '\nHTTP=%{http_code}' \
-        http://127.0.0.1:18791/health 2>&1 || true)"
+        "http://127.0.0.1:${HEALTH_HOST_PORT}/health" 2>&1 || true)"
 fi
-assert_contains 17 "host port 18791/health returns 200" "$host_health" "HTTP=200"
+assert_contains 17 "host port $HEALTH_HOST_PORT/health returns 200" "$host_health" "HTTP=200"
 assert_contains 17 "host health payload reports ready" "$host_health" '"ready": true'
 
 # ---------------------------------------------------------------------------
@@ -833,14 +839,14 @@ assert_contains 22 "brew --version reports Homebrew" \
     "$(exec_nanobot sh -c 'brew --version' 2>&1)" "Homebrew"
 
 run_detached "brew install $BREW_FORMULA (app-runner env)" \
-    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'brew install $BREW_FORMULA'; echo \$? >/tmp/smoke-cmd.rc" 300
+    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'brew install $BREW_FORMULA'" 300
 assert_eq 22 "brew install $BREW_FORMULA succeeds with the app-runner env" "0" "$DETACHED_RC"
 assert_contains 22 "the bottle install reports success" \
     "$(exec_nanobot sh -c 'cat /tmp/smoke-cmd.log' 2>&1)" "$BREW_FORMULA"
 assert_eq 22 "the wrapper suppresses brew's auto-update git fetch" "0" \
     "$(exec_nanobot sh -c "grep -c 'Auto-updating Homebrew' /tmp/smoke-cmd.log || true" 2>/dev/null)"
 
-brew_which="$(exec_nanobot sh -c "$ALLOWLIST_ENV /app/.venv/bin/python -c 'import shutil, sys; print(shutil.which(sys.argv[1]) or \"\")' $BREW_FORMULA)" 2>&1)"
+brew_which="$(exec_nanobot sh -c "$ALLOWLIST_ENV /app/.venv/bin/python -c 'import shutil, sys; print(str(shutil.which(sys.argv[1])))' $BREW_FORMULA" 2>&1)"
 assert_eq 22 "shutil.which finds the bottle binary without HOMEBREW_* vars" \
     "/data/brew/bin/$BREW_FORMULA" "$brew_which"
 assert_contains 22 "the bottle binary runs" \
@@ -849,7 +855,7 @@ assert_contains 22 "the bottle binary runs" \
 assert_eq 22 "npm prefix is recorded in ~/.npmrc" "prefix=/data/home/.local" \
     "$(exec_nanobot sh -c "grep -x 'prefix=/data/home/.local' /data/home/.npmrc" 2>/dev/null)"
 run_detached "npm install -g cowsay@1.5.0 (app-runner env)" \
-    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'npm install -g cowsay@1.5.0'; echo \$? >/tmp/smoke-cmd.rc" 180
+    "cd /data/home; $ALLOWLIST_ENV /bin/bash -c 'npm install -g cowsay@1.5.0'" 180
 assert_eq 22 "npm install -g succeeds with the app-runner env" "0" "$DETACHED_RC"
 assert_eq 22 "npm global bins land in ~/.local/bin" "/data/home/.local/bin/cowsay" \
     "$(exec_nanobot sh -c 'command -v cowsay')"
