@@ -10,26 +10,47 @@ set -euo pipefail
 readonly NANOBOT_USER="nanobot"
 readonly NANOBOT_GROUP="nanobot"
 readonly LOG_PREFIX="[entrypoint]"
+readonly SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Never resolve commands from nanobot-writable directories while running as root.
+if [ "${EUID:-$(/usr/bin/id -u)}" -eq 0 ]; then
+    export PATH="$SYSTEM_PATH"
+fi
 
 log() { printf '%s %s\n' "$LOG_PREFIX" "$*"; }
 warn() { printf '%s WARNING: %s\n' "$LOG_PREFIX" "$*" >&2; }
 die() { printf '%s ERROR: %s\n' "$LOG_PREFIX" "$*" >&2; exit 1; }
 
+strip_trailing_slashes() {
+    local p="$1"
+    while [ "$p" != "/" ] && [ "${p%/}" != "$p" ]; do
+        p="${p%/}"
+    done
+    printf '%s\n' "$p"
+}
+
+reject_symlink_path() {
+    local p="$1"
+    if [ -L "$p" ]; then
+        die "refusing to use symlink $p as a data directory"
+    fi
+}
+
 apply_defaults() {
-    export HOME="${HOME:-/data/home}"
-    export NANOBOT_HOME="${NANOBOT_HOME:-/data/config}"
-    export PIXI_HOME="${PIXI_HOME:-/data/pixi}"
-    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/cache}"
-    export PIXI_CACHE_DIR="${PIXI_CACHE_DIR:-$XDG_CACHE_HOME/pixi}"
-    export UV_CACHE_DIR="${UV_CACHE_DIR:-$XDG_CACHE_HOME/uv}"
-    export UV_TOOL_DIR="${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}"
-    export UV_TOOL_BIN_DIR="${UV_TOOL_BIN_DIR:-$HOME/.local/bin}"
-    export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$XDG_CACHE_HOME/pip}"
-    export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-$XDG_CACHE_HOME/pycache}"
-    export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/data/brew}"
-    export HOMEBREW_CELLAR="${HOMEBREW_CELLAR:-$HOMEBREW_PREFIX/Cellar}"
-    export HOMEBREW_REPOSITORY="${HOMEBREW_REPOSITORY:-$HOMEBREW_PREFIX/Homebrew}"
-    export HOMEBREW_CACHE="${HOMEBREW_CACHE:-$XDG_CACHE_HOME/brew}"
+    export HOME="$(strip_trailing_slashes "${HOME:-/data/home}")"
+    export NANOBOT_HOME="$(strip_trailing_slashes "${NANOBOT_HOME:-/data/config}")"
+    export PIXI_HOME="$(strip_trailing_slashes "${PIXI_HOME:-/data/pixi}")"
+    export XDG_CACHE_HOME="$(strip_trailing_slashes "${XDG_CACHE_HOME:-/data/cache}")"
+    export PIXI_CACHE_DIR="$(strip_trailing_slashes "${PIXI_CACHE_DIR:-$XDG_CACHE_HOME/pixi}")"
+    export UV_CACHE_DIR="$(strip_trailing_slashes "${UV_CACHE_DIR:-$XDG_CACHE_HOME/uv}")"
+    export UV_TOOL_DIR="$(strip_trailing_slashes "${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}")"
+    export UV_TOOL_BIN_DIR="$(strip_trailing_slashes "${UV_TOOL_BIN_DIR:-$HOME/.local/bin}")"
+    export PIP_CACHE_DIR="$(strip_trailing_slashes "${PIP_CACHE_DIR:-$XDG_CACHE_HOME/pip}")"
+    export PYTHONPYCACHEPREFIX="$(strip_trailing_slashes "${PYTHONPYCACHEPREFIX:-$XDG_CACHE_HOME/pycache}")"
+    export HOMEBREW_PREFIX="$(strip_trailing_slashes "${HOMEBREW_PREFIX:-/data/brew}")"
+    export HOMEBREW_CELLAR="$(strip_trailing_slashes "${HOMEBREW_CELLAR:-$HOMEBREW_PREFIX/Cellar}")"
+    export HOMEBREW_REPOSITORY="$(strip_trailing_slashes "${HOMEBREW_REPOSITORY:-$HOMEBREW_PREFIX/Homebrew}")"
+    export HOMEBREW_CACHE="$(strip_trailing_slashes "${HOMEBREW_CACHE:-$XDG_CACHE_HOME/brew}")"
     export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"
     export HOMEBREW_NO_ANALYTICS="${HOMEBREW_NO_ANALYTICS:-1}"
     export HOMEBREW_NO_ENV_HINTS="${HOMEBREW_NO_ENV_HINTS:-1}"
@@ -119,8 +140,12 @@ establish_symlink() {
                         die "migration copy from $link to $target failed; source left untouched"
                     fi
                 fi
+                local cwd_was_workspace=0
                 if [ -d "$target/workspace" ] && [ -z "$(ls -A "$target/workspace")" ] &&
                    { [ -e "$stage/workspace" ] || [ -L "$stage/workspace" ]; }; then
+                    if [ "$(stat -c '%d:%i' . 2>/dev/null || true)" = "$(stat -c '%d:%i' "$target/workspace" 2>/dev/null || true)" ]; then
+                        cwd_was_workspace=1
+                    fi
                     rmdir "$target/workspace" || {
                         rm -rf "$stage"
                         die "could not replace empty $target/workspace during migration"
@@ -131,6 +156,13 @@ establish_symlink() {
                         mv -- "$entry" "$target/" || die "could not move migrated entry $entry into $target"
                     fi
                 done
+                if [ "$cwd_was_workspace" -eq 1 ]; then
+                    if [ -d "$target/workspace" ]; then
+                        cd "$target/workspace"
+                    else
+                        cd "$target"
+                    fi
+                fi
                 rmdir "$stage" || die "could not remove migration staging dir $stage"
                 rm -rf "$link" || die "could not remove $link after migration"
                 log "migrated contents of $link into $target"
@@ -158,7 +190,7 @@ establish_symlink() {
 # cheap on later boots. find does not follow the .nanobot symlink.
 fix_ownership() {
     local dir
-    if [ -d /data ]; then
+    if [ -d /data ] && [ ! -L /data ]; then
         find /data -maxdepth 0 \( ! -uid "$NANOBOT_UID" -o ! -gid "$NANOBOT_GID" \) \
             -exec chown -h "$NANOBOT_UID:$NANOBOT_GID" {} +
     fi
@@ -170,6 +202,7 @@ fix_ownership() {
         esac
     done
     for dir in "${roots[@]}"; do
+        reject_symlink_path "$dir"
         [ -d "$dir" ] || continue
         find "$dir" \( ! -uid "$NANOBOT_UID" -o ! -gid "$NANOBOT_GID" \) \
             -exec chown -h "$NANOBOT_UID:$NANOBOT_GID" {} +
@@ -177,7 +210,20 @@ fix_ownership() {
 }
 
 root_phase() {
+    local dir
     log "setup as uid=$(id -u) gid=$(id -g)"
+
+    for dir in /data \
+        "$NANOBOT_HOME" "$NANOBOT_HOME/workspace" \
+        "$HOME" "$HOME/.local" "$HOME/.local/bin" "$HOME/.local/share" \
+        "$HOME/.local/share/uv" "$HOME/.local/share/uv/tools" \
+        "$PIXI_HOME" \
+        "$HOMEBREW_PREFIX" \
+        "$XDG_CACHE_HOME" \
+        "$PIXI_CACHE_DIR" "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HOMEBREW_CACHE" \
+        "$PYTHONPYCACHEPREFIX"; do
+        reject_symlink_path "$dir"
+    done
 
     mkdir -p "$NANOBOT_HOME" \
         "$HOME/.local/bin" \
@@ -368,6 +414,8 @@ ensure_brew_cache_link() {
 
 # Seed $HOMEBREW_PREFIX from the image when empty (for example on a fresh host
 # bind mount such as ./data:/data, which Docker does not auto-populate).
+# Copy bin/ last so $HOMEBREW_PREFIX/bin/brew only exists once the rest of the
+# seed (including portable Ruby) has been copied cleanly.
 seed_brew() {
     local seed="/usr/local/share/nanobot-brew-seed"
     local entry
@@ -377,15 +425,26 @@ seed_brew() {
     [ -x "$HOMEBREW_PREFIX/bin/brew" ] && return 0
 
     for entry in "$seed"/* "$seed"/.[!.]* "$seed"/..?*; do
-        if [ -e "$entry" ] || [ -L "$entry" ]; then
-            entries+=("$entry")
+        if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+            continue
         fi
+        [ "$entry" = "$seed/bin" ] && continue
+        entries+=("$entry")
     done
-    [ "${#entries[@]}" -gt 0 ] || return 0
+    [ "${#entries[@]}" -gt 0 ] || [ -e "$seed/bin" ] || return 0
 
     log "seeding Homebrew into $HOMEBREW_PREFIX"
-    if ! cp -RP --preserve=mode,links -- "${entries[@]}" "$HOMEBREW_PREFIX/"; then
+    if [ "${#entries[@]}" -gt 0 ] &&
+       ! cp -RPf --preserve=mode,links -- "${entries[@]}" "$HOMEBREW_PREFIX/"; then
+        rm -f "$HOMEBREW_PREFIX/bin/brew" 2>/dev/null || true
         warn "could not seed Homebrew into $HOMEBREW_PREFIX; brew may be unavailable"
+        return 0
+    fi
+    if [ -d "$seed/bin" ] &&
+       ! cp -RPf --preserve=mode,links -- "$seed/bin" "$HOMEBREW_PREFIX/"; then
+        rm -f "$HOMEBREW_PREFIX/bin/brew" 2>/dev/null || true
+        warn "could not finish seeding Homebrew bin into $HOMEBREW_PREFIX; brew may be unavailable"
+        return 0
     fi
 }
 
@@ -458,7 +517,7 @@ unprivileged_phase() {
     done
 
     ensure_symlink
-    export PATH="$PIXI_HOME/bin:$HOME/.local/bin:$HOMEBREW_PREFIX/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    export PATH="$PIXI_HOME/bin:$HOME/.local/bin:$HOMEBREW_PREFIX/bin:/app/.venv/bin:$SYSTEM_PATH"
 
     if [ "$#" -eq 0 ]; then
         set -- gateway

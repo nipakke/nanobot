@@ -60,7 +60,8 @@ pass `-u nanobot`.
   remains available), or build locally with `BUNDLE_TUI=1` for air-gapped hosts.
 - **Bytecode:** No `.pyc` files are baked into the image.
   `PYTHONPYCACHEPREFIX=/data/cache/pycache` compiles modules on first use into
-  the disposable cache; the Docker healthcheck runs with `-B`.
+  the disposable cache; the Docker healthcheck runs the root-owned system Python
+  with `-I -B` and drops to `nanobot` before probing.
 - **`NANOBOT_HOME` and `~/.nanobot`:** `NANOBOT_HOME=/data/config` is applied
   at venv startup via `sitecustomize.py` so `nanobot status` reports
   `/data/config/config.json`, while the `~/.nanobot -> /data/config` symlink

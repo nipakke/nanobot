@@ -261,9 +261,11 @@ WORKDIR /data/config/workspace
 EXPOSE 8765 18790
 STOPSIGNAL SIGTERM
 
-# -B keeps Docker's root-executed healthcheck from writing __pycache__.
+# Use the root-owned system Python in isolated mode (-I -B) rather than the
+# nanobot-writable /app/.venv so Docker's root-executed healthcheck never runs
+# user-writable code or writes __pycache__.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD ["/app/.venv/bin/python", "-B", "/usr/local/bin/healthcheck.py"]
+    CMD ["/usr/local/bin/python3", "-I", "-B", "/usr/local/bin/healthcheck.py"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["gateway"]
