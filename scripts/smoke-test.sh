@@ -10,7 +10,10 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-readonly IMAGE="nanobot-pixi:smoke"
+readonly IMAGE="${NANOBOT_SMOKE_IMAGE:-nanobot-pixi:smoke}"
+# NANOBOT_SMOKE_SKIP_BUILD=1 tests an image that is already present (CI builds
+# it once, tests it, and pushes exactly that image) instead of building one.
+readonly SKIP_BUILD="${NANOBOT_SMOKE_SKIP_BUILD:-0}"
 readonly PROJECT="nanobot-smoke-$$"
 # compose.yaml pins `container_name: nanobot` for operators. The suite passes
 # scripts/smoke-compose.yaml last to override it, so an operator's `nanobot`
@@ -18,6 +21,19 @@ readonly PROJECT="nanobot-smoke-$$"
 readonly CONTAINER_NAME="${PROJECT}-nanobot"
 readonly BOOTSTRAP_NAME="${PROJECT}-bootstrap"
 readonly BUILD_LOG="${TMPDIR:-/tmp}/nanobot-smoke-build.log"
+
+# Expected versions come from the Dockerfile ARG defaults, the single source of
+# version pins, so a Renovate bump is checked against what it intended.
+dockerfile_arg() {
+    sed -n "s/^ARG $1=//p" Dockerfile | head -n 1 | tr -d '\r'
+}
+EXPECTED_NANOBOT_VERSION="$(dockerfile_arg NANOBOT_VERSION)"
+EXPECTED_PIXI_VERSION="$(dockerfile_arg PIXI_VERSION)"
+readonly EXPECTED_NANOBOT_VERSION EXPECTED_PIXI_VERSION
+if [ -z "$EXPECTED_NANOBOT_VERSION" ] || [ -z "$EXPECTED_PIXI_VERSION" ]; then
+    printf 'FATAL: could not read NANOBOT_VERSION/PIXI_VERSION defaults from Dockerfile\n' >&2
+    exit 1
+fi
 
 export NANOBOT_SMOKE_CONTAINER="$CONTAINER_NAME"
 COMPOSE=(docker compose -p "$PROJECT" \
@@ -197,7 +213,14 @@ printf 'project=%s container=%s image=%s\n' "$PROJECT" "$CONTAINER_NAME" "$IMAGE
 # A1: build
 # ---------------------------------------------------------------------------
 printf '\n=== A1: build ===\n'
-if docker build -t "$IMAGE" . >"$BUILD_LOG" 2>&1; then
+if [ "$SKIP_BUILD" = "1" ]; then
+    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        pass 1 "prebuilt image $IMAGE is present (NANOBOT_SMOKE_SKIP_BUILD=1)"
+    else
+        fail 1 "prebuilt image $IMAGE is present (NANOBOT_SMOKE_SKIP_BUILD=1)"
+        exit 1
+    fi
+elif docker build -t "$IMAGE" . >"$BUILD_LOG" 2>&1; then
     pass 1 "docker build -t $IMAGE ."
     tail -5 "$BUILD_LOG"
 else
@@ -228,6 +251,7 @@ WEB_HOST_PORT="${NANOBOT_SMOKE_WEB_PORT:-18766}"
 HEALTH_HOST_PORT="${NANOBOT_SMOKE_HEALTH_PORT:-18791}"
 
 export NANOBOT_IMAGE="$IMAGE"
+export NANOBOT_BUILD_IMAGE="$IMAGE"
 export EXTRA_PIXI_PACKAGES="jq,ripgrep,nodejs"
 export TZ="UTC"
 export NANOBOT_HEALTH_HOST_PORT="$HEALTH_HOST_PORT"
@@ -311,8 +335,8 @@ pixi_version="$(exec_nanobot sh -c 'pixi --version' 2>&1)"
 uv_version="$(exec_nanobot sh -c 'uv --version' 2>&1)"
 tini_version="$(exec_nanobot sh -c 'tini --version' 2>&1)"
 unzip_version="$(exec_nanobot unzip -v 2>&1)"
-assert_contains 4 "nanobot --version" "$nanobot_version" "0.4.2"
-assert_contains 4 "pixi --version" "$pixi_version" "0.84.2"
+assert_contains 4 "nanobot --version" "$nanobot_version" "$EXPECTED_NANOBOT_VERSION"
+assert_contains 4 "pixi --version" "$pixi_version" "${EXPECTED_PIXI_VERSION#v}"
 assert_contains 4 "uv --version" "$uv_version" "uv "
 assert_contains 4 "tini --version" "$tini_version" "tini version"
 assert_contains 4 "unzip is installed" "$unzip_version" "UnZip"
@@ -728,7 +752,7 @@ assert_contains 20 "cheat sheet documents NANOBOT_CHANNELS" "$cheat_sheet" "NANO
 printf '\n=== A21: channel dependencies ===\n'
 assert_eq 21 "/usr/local/bin/nanobot-channels.py is executable" "0" \
     "$(exec_nanobot test -x /usr/local/bin/nanobot-channels.py >/dev/null 2>&1; echo $?)"
-assert_eq 21 "the image exposes NANOBOT_VERSION" "0.4.2" \
+assert_eq 21 "the image exposes NANOBOT_VERSION" "$EXPECTED_NANOBOT_VERSION" \
     "$(docker run --rm --entrypoint sh "$IMAGE" -c 'echo "$NANOBOT_VERSION"' 2>&1)"
 absent_out="$(docker run --rm --entrypoint /app/.venv/bin/python "$IMAGE" \
     -c 'import discord' 2>&1)"

@@ -1,6 +1,8 @@
 # nanobot + pixi in Docker
 
-Run `nanobot-ai==0.4.2` in a reproducible Debian container with:
+Run `nanobot-ai` (the latest stable release, tracked automatically; see
+[Published image and updates](#published-image-and-updates)) in a reproducible
+Debian container with:
 
 - pixi as the supported way for the bot to install native/CLI tools at runtime;
 - Homebrew baked into the image at `/data/brew`, on its own persistent volume,
@@ -28,7 +30,7 @@ The image starts as root only for the entrypoint setup phase, then drops to
 ```
 image layers (ephemeral)                 named volumes (persistent)
 ┌──────────────────────────────┐         ┌──────────────────────────────┐
-│ /app/.venv   nanobot 0.4.2   │         │ nanobot_config -> /data/config│
+│ /app/.venv   nanobot-ai      │         │ nanobot_config -> /data/config│
 │ /usr/local/bin/pixi          │         │   config.json, sessions,      │
 │ /usr/local/bin/uv, uvx       │         │   memory, workspace           │
 │ OS packages, tini, health    │         ├──────────────────────────────┤
@@ -68,7 +70,9 @@ cp .env.example .env
 # Edit .env: at minimum set NANOBOT_WEB_TOKEN (or let the first start generate
 # one and read it from the logs).
 
-docker compose -f compose.yaml -f compose.build.yaml up -d --build
+docker compose up -d                 # published nipakke/nanobot:latest
+# or build locally instead:
+# docker compose -f compose.yaml -f compose.build.yaml up -d --build
 docker compose logs -f nanobot
 ```
 
@@ -86,23 +90,27 @@ first created; changing it later requires editing (or removing) `config.json`.
 
 ### Prebuilt image (Portainer)
 
-`compose.yaml` is image-only and never builds. Point `NANOBOT_IMAGE` at the
-published image reference, then deploy the stack. No registry credentials, CI,
-or publishing are part of this repository.
+`compose.yaml` is image-only and never builds. It runs
+`${NANOBOT_IMAGE:-nipakke/nanobot:latest}`; set `NANOBOT_IMAGE` to a fixed tag
+to stop following `latest` (see [tags](#tags)), then deploy the stack.
 
 ### Local builds
 
 `compose.build.yaml` is an overlay that adds the `build:` section and build
-args:
+args, and tags the result `${NANOBOT_BUILD_IMAGE:-nanobot-pixi:local}` so a
+local build never shadows the published image:
 
 ```sh
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-Build args: `NANOBOT_VERSION=0.4.2`, `PIXI_VERSION=v0.84.2`,
-`BUNDLE_TUI=0`, `BREW_VERSION=7.0.16`,
-`BREW_COMMIT=7ef183d10e7d6e5620d7124b744b1dfbf69fc108`, `UID=1000`,
-`GID=1000`.
+Version pins live only in the `Dockerfile` (`NANOBOT_VERSION`,
+`PIXI_VERSION`, `BREW_VERSION` + `BREW_COMMIT`, and the base images pinned by
+digest) and are kept current by Renovate. `compose.build.yaml` passes a pin
+through only when it is set in the environment or `.env`, so leave them unset
+unless you deliberately build another version; a stale value in `.env` would
+override the Dockerfile on every build. Other build args: `BUNDLE_TUI=0`,
+`UID=1000`, `GID=1000`.
 
 `BUNDLE_TUI=1` keeps the ~123 MiB native TUI binary in the image for
 offline/air-gapped hosts; the default `0` removes it from the build stage, so
@@ -116,11 +124,68 @@ build time; bump both together.
 BUNDLE_TUI=1 docker compose -f compose.yaml -f compose.build.yaml build
 ```
 
-Multi-arch (publishing is out of scope):
+Multi-arch local build (published images are `linux/amd64` only for now):
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 .
 ```
+
+## Published image and updates
+
+`docker.io/nipakke/nanobot` (`linux/amd64`) is built and published by GitHub
+Actions, gated by the full A1–A22 acceptance suite.
+
+### Tags
+
+- `latest` and `<version>` (for example `0.4.2`) move to the newest verified
+  build.
+- `<version>-<YYYYMMDD>-<shortsha>` is immutable and is the rollback target.
+  Pin a fixed tag in `NANOBOT_IMAGE` if you want no surprises; to roll back
+  `latest` or `<version>`, re-tag the previous fixed tag.
+
+### Automated updates (Renovate)
+
+`renovate.json` tracks all pinned inputs (`Dockerfile` `ARG` pins, digest-pinned
+base images, and GitHub Actions) with stable releases only (`ignoreUnstable`)
+and a 2-day `minimumReleaseAge`:
+
+- **`nanobot-ai`:** every stable release (majors included) opens its own PR as
+  soon as it is 2 days old and auto-merges when the `test` workflow passes.
+- **Base image digests, pixi, Homebrew, GitHub Actions (minor/patch/digest):**
+  batched into one `monthly maintenance` PR on the 1st of each month,
+  auto-merged when `test` passes. Base images stay on their `3.12`/`bookworm`
+  tag line; only digests move.
+- **Major updates of everything except `nanobot-ai`:** opened as separate PRs
+  and wait for manual approval.
+
+### Workflows
+
+Two separate workflows keep pull requests isolated from registry credentials:
+
+- `.github/workflows/test.yml` runs on `pull_request` only. It builds the image
+  and runs `scripts/smoke-test.sh` (A1–A22) with no registry secrets and no
+  push steps. Require this `test` check on `main` to gate auto-merges.
+- `.github/workflows/publish.yml` runs only on `push` to `main` when files
+  baked into the image change (`Dockerfile`, `entrypoint.sh`, `.dockerignore`,
+  `scripts/**` excluding `smoke-*`, `etc/**`), or on manual `workflow_dispatch`.
+  Docs, CI, and Renovate config changes never publish. It builds, runs A1–A22
+  against that image, tags it, and pushes the exact tested image.
+
+> **Dry-run state:** the Docker Hub login and `docker push` steps in
+> `.github/workflows/publish.yml` are commented out until the Docker Hub
+> repository and secrets are ready. Uncomment them after completing the setup
+> below.
+
+### One-time GitHub and Docker Hub setup
+
+1. Create `nipakke/nanobot` on Docker Hub and create a Read & Write access token
+   scoped to that repository.
+2. Add repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in GitHub.
+3. Install the **Renovate** GitHub App on the repository.
+4. In GitHub Settings → General, enable **Allow auto-merge**.
+5. Add a branch protection rule / ruleset on `main` requiring the `test` status
+   check to pass (without this, auto-merge does not wait for tests).
+6. Uncomment the login and push steps in `.github/workflows/publish.yml`.
 
 ## Persistent trees and reset matrix
 
@@ -288,13 +353,13 @@ named volume (`nanobot_brew`). It exists for WebUI Apps whose install command is
 `brew install <pkg>`: those binaries land in `/data/brew/bin`, which is on
 `PATH`, and survive restarts, recreates and image upgrades. The baked tree is
 about 80 MB (mostly Homebrew's vendored portable Ruby; its image layer is about
-83 MB), and the source is pinned to release 7.0.16 at commit
-`7ef183d10e7d6e5620d7124b744b1dfbf69fc108`, verified at build time. `docs`,
-`manpages`, `completions` and `.github` are pruned; `.git` stays because
-Homebrew reports its concrete version from it.
+83 MB), and the source is pinned to a release tag and commit (`BREW_VERSION` /
+`BREW_COMMIT` in `Dockerfile`), verified at build time. `docs`, `manpages`,
+`completions` and `.github` are pruned; `.git` stays because Homebrew reports
+its concrete version from it.
 
 ```sh
-docker compose exec -u nanobot nanobot brew --version      # Homebrew 7.0.16
+docker compose exec -u nanobot nanobot brew --version
 docker compose exec -u nanobot nanobot brew --prefix       # /data/brew
 docker compose exec -u nanobot nanobot brew install tree   # -> /data/brew/bin/tree
 ```
@@ -530,17 +595,27 @@ container layer and disappear on the next recreate. The entrypoint enforces
 this for container starts and `docker compose run ... update`; `docker exec`
 bypasses entrypoint logic by design, so use Compose for launch commands.
 
-Upgrade by rebuilding the image with a new version:
+Upgrade by pulling the new published tag (or pinning the new fixed tag in
+`NANOBOT_IMAGE`):
 
 ```sh
-NANOBOT_IMAGE=nanobot-pixi:0.5.0 NANOBOT_VERSION=0.5.0 \
+docker compose pull
+docker compose up -d
+```
+
+For local builds, override `NANOBOT_VERSION` and `NANOBOT_BUILD_IMAGE` (or bump
+the `Dockerfile` pin):
+
+```sh
+NANOBOT_BUILD_IMAGE=nanobot-pixi:0.5.0 NANOBOT_VERSION=0.5.0 \
   docker compose -f compose.yaml -f compose.build.yaml build
 NANOBOT_IMAGE=nanobot-pixi:0.5.0 docker compose up -d
 ```
 
-Set both values: `NANOBOT_VERSION` changes the package inside the image, while
-`NANOBOT_IMAGE` is the tag Compose actually runs. Reusing the old tag is
-possible but makes the tag lie about its contents.
+Set both values when overriding locally: `NANOBOT_VERSION` changes the package
+inside the image, while `NANOBOT_BUILD_IMAGE` / `NANOBOT_IMAGE` control the tag
+Compose builds and runs. Reusing the old tag makes the tag lie about its
+contents.
 
 Back up `/data/config` first. `/data/home`, `/data/pixi`, `/data/brew`, and
 `/data/cache` survive. A pixi version bump keeps `/data/pixi`; if a new pixi
@@ -681,5 +756,8 @@ It uses a unique Compose project name, container name
 can run next to a live stack. Both host ports are overridable with
 `NANOBOT_SMOKE_WEB_PORT` / `NANOBOT_SMOKE_HEALTH_PORT`; on Windows hosts whose
 excluded port ranges cover the defaults, Docker Desktop fails with
-`forwards/expose ... 500` and an access-denied bind, so pick free ports. It
-cleans up only its own containers, volumes, and network.
+`forwards/expose ... 500` and an access-denied bind, so pick free ports. To test
+an image that is already built (as CI does), set
+`NANOBOT_SMOKE_IMAGE=<ref> NANOBOT_SMOKE_SKIP_BUILD=1`. Expected versions in A4
+and A21 are read from the `Dockerfile` `ARG` defaults. It cleans up only its own
+containers, volumes, and network.

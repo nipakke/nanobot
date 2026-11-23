@@ -1,0 +1,56 @@
+name: test
+
+# Pull-request verification only. Builds the image and runs the full A1-A22
+# acceptance suite. Contains no registry credentials and never publishes, so it
+# is safe to run on untrusted PRs in a public repository.
+#
+# Require this job (`test`) in branch protection on `main` to gate Renovate
+# auto-merges.
+
+on:
+  pull_request:
+
+env:
+  TEST_IMAGE: nanobot-pixi:ci
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Free runner disk space
+        if: ${{ !env.ACT }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.TEST_IMAGE }}
+          # act has no GitHub Actions cache backend for BuildKit; the cache is
+          # an optimisation only.
+          cache-from: ${{ !env.ACT && 'type=gha' || '' }}
+          cache-to: ${{ !env.ACT && 'type=gha,mode=max' || '' }}
+
+      - name: Acceptance suite (A1-A22)
+        env:
+          NANOBOT_SMOKE_IMAGE: ${{ env.TEST_IMAGE }}
+          NANOBOT_SMOKE_SKIP_BUILD: "1"
+        run: bash scripts/smoke-test.sh

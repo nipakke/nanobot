@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "nanobot-ai releases auto-merge immediately; everything else is batched into one monthly auto-merged PR; majors of other dependencies wait for approval. Every merge is gated by the A1-A22 acceptance suite (required check). See README 'Published image and updates'.",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "timezone": "Europe/Budapest",
+  "enabledManagers": ["dockerfile", "github-actions", "custom.regex"],
+  "ignoreUnstable": true,
+  "minimumReleaseAge": "2 days",
+  "internalChecksFilter": "strict",
+  "platformAutomerge": true,
+  "automergeType": "pr",
+  "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Dockerfile ARG pins annotated with '# renovate:' comments; an optional *_COMMIT line right after the *_VERSION line is updated as its digest.",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG [A-Z_]+_VERSION=(?<currentValue>\\S+)(\\s+ARG [A-Z_]+_COMMIT=(?<currentDigest>[0-9a-f]{40}))?"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Base images stay on their tag line (python 3.12, bookworm); only digests are updated. Changing the line is a deliberate edit.",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "enabled": false
+    },
+    {
+      "description": "Everything except nanobot-ai: one grouped PR on the 1st of the month, auto-merged when the suite passes.",
+      "matchPackageNames": ["!nanobot-ai"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest"],
+      "groupName": "monthly maintenance",
+      "schedule": ["* 0-5 1 * *"],
+      "automerge": true
+    },
+    {
+      "description": "Majors of everything except nanobot-ai: separate PRs that wait for manual approval.",
+      "matchPackageNames": ["!nanobot-ai"],
+      "matchUpdateTypes": ["major"],
+      "schedule": ["* 0-5 1 * *"],
+      "automerge": false,
+      "labels": ["dependencies", "major"]
+    },
+    {
+      "description": "nanobot-ai: every stable release (majors included) as soon as it is 2 days old, auto-merged when the suite passes.",
+      "matchPackageNames": ["nanobot-ai"],
+      "schedule": ["at any time"],
+      "automerge": true,
+      "prPriority": 10,
+      "labels": ["dependencies", "nanobot"]
+    }
+  ]
+}

@@ -3,12 +3,24 @@
 # ---------------------------------------------------------------------------
 # Stage 1: build the nanobot venv with uv, pinned to the system Python.
 # ---------------------------------------------------------------------------
+#
+# Version pins live only here: compose.build.yaml and .env pass them through
+# only when explicitly set. Renovate updates these lines (renovate.json): the
+# `# renovate:` comment above each pin names its upstream source, and the base
+# images are pinned by digest within their tag line.
+# ---------------------------------------------------------------------------
+# renovate: datasource=pypi depName=nanobot-ai
 ARG NANOBOT_VERSION=0.4.2
+# renovate: datasource=github-releases depName=prefix-dev/pixi
 ARG PIXI_VERSION=v0.84.2
+# BREW_VERSION and BREW_COMMIT are verified against each other at build time.
+# renovate: datasource=github-tags depName=Homebrew/brew
+ARG BREW_VERSION=7.0.16
+ARG BREW_COMMIT=7ef183d10e7d6e5620d7124b744b1dfbf69fc108
 ARG BUNDLE_TUI=0
 ARG UID=1000
 ARG GID=1000
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS nanobot
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 AS nanobot
 
 ARG NANOBOT_VERSION
 ARG BUNDLE_TUI
@@ -50,7 +62,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 2: download the pinned pixi release binary (statically linked, musl).
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS pixi
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS pixi
 
 ARG PIXI_VERSION
 ARG TARGETARCH
@@ -87,13 +99,13 @@ RUN set -eux; \
 # prefix from the location of bin/brew, so the prefix must be a real install
 # tree at a stable path, not an env-only convention.
 # ---------------------------------------------------------------------------
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS runtime
 
 ARG NANOBOT_VERSION
 ARG UID
 ARG GID
-ARG BREW_VERSION=7.0.16
-ARG BREW_COMMIT=7ef183d10e7d6e5620d7124b744b1dfbf69fc108
+ARG BREW_VERSION
+ARG BREW_COMMIT
 
 LABEL org.opencontainers.image.title="nanobot + pixi" \
       org.opencontainers.image.description="nanobot-ai with pixi-managed runtime tools and persistent /data trees" \

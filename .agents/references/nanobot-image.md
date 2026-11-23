@@ -4,15 +4,15 @@ Sources: `README.md`, `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-des
 
 ## Image
 
-- Debian `bookworm-slim`; glibc is required, so no Alpine. `nanobot-ai==0.4.2` lives in `/app/.venv` (image layer, ephemeral, owned by `nanobot`); the pixi binary is baked in.
+- Debian `bookworm-slim`; glibc is required, so no Alpine. `nanobot-ai` (version pinned in `Dockerfile`) lives in `/app/.venv` (image layer, ephemeral, owned by `nanobot`); the pixi binary is baked in.
 - The default image omits the ~123 MiB `nanobot/tui/bin/nanobot-tui-linux-x64` from the builder stage, so no whiteout and no final-image layer carries it. The launcher downloads the checksum-verified release asset to `/data/config/bin/tui/<version>` on first TUI use; `NANOBOT_TUI_NO_DOWNLOAD=1` forces the documented `TuiUnavailableError`. `BUNDLE_TUI=1` keeps the binary for offline/air-gapped builds.
 - No `.pyc` is baked. `PYTHONPYCACHEPREFIX=/data/cache/pycache` compiles imported modules on first use into the disposable cache tree; recreates reuse them. Healthcheck still runs `-B`.
-- Homebrew source is pinned to release 7.0.16 / commit `7ef183d10e7d6e5620d7124b744b1dfbf69fc108` (`BREW_VERSION`, `BREW_COMMIT`), verified at build time. `docs`, `manpages`, `completions` and `.github` are pruned; `.git` is kept so `brew --version` reports the concrete release.
+- Homebrew source is pinned to a release tag and commit (`BREW_VERSION`, `BREW_COMMIT` in `Dockerfile`), verified at build time. `docs`, `manpages`, `completions` and `.github` are pruned; `.git` is kept so `brew --version` reports the concrete release.
 - pixi is the only supported way to install runtime native/CLI tools. No runtime `apt`/`apk`, no `sudo`, no setuid helpers.
 - Root exists only for setup (`/data` trees and ownership fixes), then `exec setpriv --reuid=nanobot --regid=nanobot --init-groups`.
 - Compose: `cap_drop: [ALL]`, `cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID]`, `security_opt: [no-new-privileges:true]`. All caps are cleared after the drop; `DAC_OVERRIDE` lets the ownership scan enter `0700` dirs such as `/data/home/.ssh`.
 - The image user is root, so every `docker exec` needs `-u nanobot`; a plain exec can create root-owned files in `/data`. Docker constraint, not a preference.
-- In-container `nanobot update` is rejected by design. Upgrade with a `/data/config` backup and an image rebuild: set both `NANOBOT_VERSION` (package) and `NANOBOT_IMAGE` (tag Compose runs).
+- In-container `nanobot update` is rejected by design. Upgrade with a `/data/config` backup by pulling the new published tag (or rebuilding locally with `NANOBOT_VERSION` and `NANOBOT_BUILD_IMAGE`).
 - Shell scripts (`*.sh`) stay LF; never commit CRLF.
 
 ## Persistence
@@ -36,6 +36,12 @@ Sources: `README.md`, `docs/superpowers/specs/2026-11-23-nanobot-pixi-docker-des
 - `PATH`: `/data/pixi/bin`, `/data/home/.local/bin`, `/data/brew/bin`, `/app/.venv/bin`.
 - nanobot's agent exec tool starts with a clean env: `_build_env` omits `PATH` and the image's cache/runtime vars, so container defaults do not reach the agent. Bootstrap sets `tools.exec.pathPrepend` to the four image tool dirs and forwards `PIXI_HOME`, `PIXI_CACHE_DIR`, `PIXI_NO_TELEMETRY`, `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `UV_LINK_MODE`, `PIP_CACHE_DIR`, `PYTHONPYCACHEPREFIX`, `NANOBOT_HOME`, and `TZ` in `tools.exec.allowedEnvKeys`; without them, `pixi global list` reports no environments and tool caches leak into `/data/home`. Existing configs created before this need both fields updated.
 - `/usr/bin/unzip` is baked in for zip-based casks. Without it, Homebrew's ZIP strategy calls `Formula["unzip"]` inside its Landlock sandbox, which tries to write the formula API cache and fails with `EACCES` on a cold cache at `api.rb:288` (seen with `brew install --cask 1password-cli`).
+
+## Publishing and updates
+
+- `Dockerfile` is the single source of truth for version pins (`NANOBOT_VERSION`, `PIXI_VERSION`, `BREW_VERSION` + `BREW_COMMIT`, and digest-pinned `FROM` lines). `compose.build.yaml` passes pin args through only when set in env/`.env`; `compose.yaml` defaults to `nipakke/nanobot:latest` while `compose.build.yaml` tags `nanobot-pixi:local`.
+- `renovate.json`: stable releases only, 2-day `minimumReleaseAge`. Every `nanobot-ai` release (majors included) opens a PR immediately and auto-merges on green `test`; base-image digests, pixi, Homebrew, and GitHub Actions (minor/patch/digest) batch into one monthly auto-merged PR on the 1st; majors of non-nanobot dependencies wait for approval.
+- Two separate workflows keep PRs isolated from registry secrets on a public repo: `.github/workflows/test.yml` (`pull_request` only, required check, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image-file paths or `workflow_dispatch`; builds, runs A1–A22 via `NANOBOT_SMOKE_SKIP_BUILD=1`, tags `latest`, `<version>`, and immutable `<version>-<YYYYMMDD>-<shortsha>`, then pushes that exact tested image; login/push steps start commented out for dry-run).
 
 ## Commands
 

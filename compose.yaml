@@ -2,7 +2,7 @@ name: nanobot
 
 services:
   nanobot:
-    image: ${NANOBOT_IMAGE:-nanobot-pixi:0.4.2}
+    image: ${NANOBOT_IMAGE:-nipakke/nanobot:latest}
     container_name: nanobot
     # The image starts as root only for the entrypoint setup phase; the
     # entrypoint drops to the nanobot user before running anything else.

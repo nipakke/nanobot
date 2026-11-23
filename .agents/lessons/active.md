@@ -109,3 +109,13 @@
 - Agent did: Re-ran with free port overrides, confirmed the error was port-independent, stopped at the layer boundary, and verified the changed behavior with `docker run` and no published ports plus the container-side healthcheck.
 - Trigger: `bash scripts/smoke-test.sh` after the symlink-removal change.
 - Evidence: `/tmp/opencode/smoke-run.log` A6 failure; `docker run -p 18894:80` same 500; live `nanobot` 8765 and 28790 still answer 200.
+
+## L-0014 — Keep PR test workflows strictly separate from publishing on a public repo
+- Count: 1
+- First: 2026-11-23
+- Last: 2026-11-23
+- Source: correction
+- What happened / correction: The user rejected combining `pull_request` testing and Docker Hub publishing in a single workflow (`image.yml`) gated by an `if` step, noting this is a public repository and PRs must never be part of a publish workflow.
+- Agent did: Put `pull_request`, `push`, and `workflow_dispatch` plus Docker Hub login/push steps in one `.github/workflows/image.yml` job gated by `decide-publish.sh`.
+- Trigger: Review of the GitHub Actions publishing workflow.
+- Evidence: user correction of 2026-11-23; split into `.github/workflows/test.yml` (`pull_request` only, zero secrets) and `.github/workflows/publish.yml` (`push` to `main` on image paths + `workflow_dispatch`).

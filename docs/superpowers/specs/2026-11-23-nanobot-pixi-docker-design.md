@@ -1,8 +1,8 @@
 # nanobot + pixi Docker image — design
 
 Date: 2026-11-23
-Status: implemented and verified (revision 5: 177 acceptance checks A1–A22).
-Revision: 5 (Homebrew on its own volume, npm global prefix, durable workspace rules)
+Status: implemented and verified (revision 6: publishing and automated updates; 177 acceptance checks A1–A22).
+Revision: 6 (Docker Hub publishing, separated PR/publish workflows, Renovate automation)
 
 Post-revision note (size pass): the default image no longer bundles the native
 TUI binary (`BUNDLE_TUI=1` opts in), ships no `.pyc` (runtime cache prefix
@@ -768,3 +768,51 @@ reaches `brew` or `npm` there.
   with `exit status 0xc00000fd`), the same failure signature the 9p brew spike
   produced; the run was resumed detached and finished in 4 s. The suite must not
   depend on that payload.
+
+## Revision 6: publishing and automated updates
+
+Revision 6 brings Docker Hub publishing (`docker.io/nipakke/nanobot`,
+`linux/amd64`) and automated dependency updates into scope.
+
+### Single source of truth for versions
+
+- `Dockerfile` owns all version pins: `NANOBOT_VERSION`, `PIXI_VERSION`,
+  `BREW_VERSION` + `BREW_COMMIT` (annotated with `# renovate:` comments), and
+  digest-pinned `FROM` lines (`python:3.12-slim-bookworm`,
+  `debian:bookworm-slim`, `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`).
+- `compose.build.yaml` passes the pin args in list form (no defaults), so an
+  unset env/`.env` leaves the `Dockerfile` defaults intact; it also sets
+  `image: ${NANOBOT_BUILD_IMAGE:-nanobot-pixi:local}` so local builds never
+  shadow the published image.
+- `compose.yaml` defaults to `${NANOBOT_IMAGE:-nipakke/nanobot:latest}`.
+- `.env.example` comments out the version pins so copying it does not freeze an
+  operator's local builds at an old version.
+- `scripts/smoke-test.sh` reads expected versions for A4/A21 from `Dockerfile`
+  `ARG` defaults and supports `NANOBOT_SMOKE_IMAGE` + `NANOBOT_SMOKE_SKIP_BUILD=1`
+  so CI tests the exact image it built.
+
+### Separated CI workflows (public-repo boundary)
+
+- `.github/workflows/test.yml` runs on `pull_request` only. It builds the image
+  and runs `scripts/smoke-test.sh` (A1–A22) with zero registry secrets and no
+  publish steps. It is the required status check on `main`.
+- `.github/workflows/publish.yml` runs only on `push` to `main` when files baked
+  into the image change (`Dockerfile`, `entrypoint.sh`, `.dockerignore`,
+  `scripts/**` excluding `smoke-*`, `etc/**`) or on `workflow_dispatch`. It
+  builds, runs A1–A22 on that image, tags `latest`, `<version>`, and immutable
+  `<version>-<YYYYMMDD>-<shortsha>`, and pushes fixed tag first, then moving
+  tags. Login and push steps start commented out for dry-run verification until
+  Docker Hub credentials are configured.
+
+### Renovate policy (`renovate.json`)
+
+- Managers restricted to `dockerfile`, `github-actions`, and `custom.regex`.
+- `ignoreUnstable: true`, `minimumReleaseAge: "2 days"`, `internalChecksFilter: "strict"`,
+  `platformAutomerge: true`.
+- `nanobot-ai`: every stable release (majors included) opens its own PR at any
+  time and auto-merges once `test` passes.
+- All other dependencies (base image digests, pixi, Homebrew, GitHub Actions):
+  minor/patch/digest updates batch into one `monthly maintenance` PR on the 1st
+  of the month and auto-merge when `test` passes. Base image tag-line jumps
+  (`3.12` → `3.13`, `bookworm` → `trixie`) are disabled; majors of other
+  dependencies open separate PRs with `automerge: false`.

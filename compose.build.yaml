@@ -1,12 +1,18 @@
 services:
   nanobot:
+    # Local builds get their own tag so they never shadow the published
+    # nipakke/nanobot image that compose.yaml runs by default.
+    image: ${NANOBOT_BUILD_IMAGE:-nanobot-pixi:local}
     build:
       context: .
       args:
-        NANOBOT_VERSION: ${NANOBOT_VERSION:-0.4.2}
-        PIXI_VERSION: ${PIXI_VERSION:-v0.84.2}
-        BUNDLE_TUI: ${BUNDLE_TUI:-0}
-        BREW_VERSION: ${BREW_VERSION:-7.0.16}
-        BREW_COMMIT: ${BREW_COMMIT:-7ef183d10e7d6e5620d7124b744b1dfbf69fc108}
-        UID: ${UID:-1000}
-        GID: ${GID:-1000}
+        # Version pins live only in the Dockerfile. These are passed through
+        # only when set in the environment or .env; otherwise the Dockerfile
+        # defaults apply.
+        - NANOBOT_VERSION
+        - PIXI_VERSION
+        - BREW_VERSION
+        - BREW_COMMIT
+        - BUNDLE_TUI=${BUNDLE_TUI:-0}
+        - UID=${UID:-1000}
+        - GID=${GID:-1000}
